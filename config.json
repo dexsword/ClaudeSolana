@@ -1,0 +1,62 @@
+{
+  "strategy": {
+    "rsi": {
+      "period": 14,
+      "tier1BuyThreshold": 30,
+      "tier2BuyThreshold": 25,
+      "tier3BuyThreshold": 20,
+      "sellThreshold": 70,
+      "extendedSellThreshold": 80,
+      "bearishBuyThreshold": 20,
+      "neutralBuyThreshold": 25
+    },
+    "vwap": {
+      "tier1DeviationPct": 2,
+      "tier2DeviationPct": 4,
+      "tier3DeviationPct": 6,
+      "sellAtVwap": true,
+      "bearishDeviationPct": 5,
+      "resetPeriod": "daily"
+    },
+    "sma": {
+      "period": 50,
+      "neutralZonePct": 3
+    },
+    "tiers": {
+      "tier1AllocationPct": 33,
+      "tier2AllocationPct": 33,
+      "tier3AllocationPct": 34
+    },
+    "risk": {
+      "stopLossPct": 8,
+      "trailingStopActivationPct": 10,
+      "trailingStopPct": 5,
+      "circuitBreakerDrawdownPct": 30,
+      "maxSlippagePct": 2
+    },
+    "cooldown": {
+      "candlesAfterExit": 2,
+      "candleDurationMinutes": 240
+    }
+  },
+  "capital": {
+    "startingCapitalUSDC": 1000
+  },
+  "timeframes": {
+    "executionTf": "4h",
+    "trendTf": "3d"
+  },
+  "network": {
+    "useDevnet": true,
+    "rpcEndpoint": "https://api.devnet.solana.com"
+  },
+  "notifications": {
+    "enabled": false,
+    "webhookUrl": "",
+    "type": "discord"
+  },
+  "scheduler": {
+    "cronExpression": "0 0,4,8,12,16,20 * * *",
+    "alignToCandle": true
+  }
+}
