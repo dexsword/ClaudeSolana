@@ -85,13 +85,15 @@ export class TradingBot {
     // ── Gas reserve check ────────────────────────────────────────────────────
     // Gas buffer = total SOL in wallet minus the SOL the bot holds as a position.
     // Only the gas buffer should cover transaction fees; position SOL gets sold normally.
+    // If gas is low: block new buys (conserve gas) but still allow sells — the sell
+    // methods will cap the amount to leave minSolReserveForGas in the wallet.
     const minGas = this.cfg.capital.minSolReserveForGas;
     const gasBuffer = balances.solBalance - this.position.solBalance;
-    if (!simulated && gasBuffer < minGas) {
-      const msg = `⚠️ Low gas warning! Gas buffer ${gasBuffer.toFixed(4)} SOL is below minimum ${minGas} SOL — trading paused until topped up`;
+    const lowGas = !simulated && gasBuffer < minGas;
+    if (lowGas) {
+      const msg = `⚠️ Low gas warning! Gas buffer ${gasBuffer.toFixed(4)} SOL is below minimum ${minGas} SOL — new buys paused until topped up`;
       console.warn(`[Bot] ${msg}`);
       await this.notifier.sendAlert(msg);
-      return;
     }
 
     // Circuit breaker compares real portfolio value against startingCapitalUSDC.
@@ -133,19 +135,22 @@ export class TradingBot {
     // ── 6. Execute signal ───────────────────────────────────────────────────
     switch (signal.action) {
       case 'buy_tier1':
+        if (lowGas) { console.warn('[Bot] Skipping buy — gas reserve too low'); break; }
         await this.executeBuy(1, availableUSDC, signal, spotPrice);
         break;
       case 'buy_tier2':
+        if (lowGas) { console.warn('[Bot] Skipping buy — gas reserve too low'); break; }
         await this.executeBuy(2, availableUSDC, signal, spotPrice);
         break;
       case 'buy_tier3':
+        if (lowGas) { console.warn('[Bot] Skipping buy — gas reserve too low'); break; }
         await this.executeBuy(3, availableUSDC, signal, spotPrice);
         break;
       case 'sell_half':
-        await this.executeSellHalf(signal, spotPrice);
+        await this.executeSellHalf(signal, spotPrice, balances.solBalance);
         break;
       case 'sell_all':
-        await this.executeSellAll(signal, spotPrice);
+        await this.executeSellAll(signal, spotPrice, balances.solBalance);
         break;
       case 'hold':
       default:
@@ -236,9 +241,23 @@ export class TradingBot {
     await this.notifier.sendTradeNotification(trade, this.dryRun);
   }
 
-  private async executeSellHalf(signal: StrategySignal, price: number): Promise<void> {
-    const halfSol = this.position.solBalance / 2;
+  private async executeSellHalf(signal: StrategySignal, price: number, walletSolBalance?: number): Promise<void> {
+    let halfSol = this.position.solBalance / 2;
     if (halfSol <= 0) return;
+
+    // Cap sell to leave gas reserve in wallet
+    if (!this.dryRun && walletSolBalance !== undefined) {
+      const minGas = this.cfg.capital.minSolReserveForGas;
+      const maxSellable = Math.max(0, walletSolBalance - minGas);
+      if (halfSol > maxSellable) {
+        console.warn(`[Bot] Sell-half capped from ${halfSol.toFixed(4)} to ${maxSellable.toFixed(4)} SOL to preserve gas reserve`);
+        halfSol = maxSellable;
+      }
+    }
+    if (halfSol <= 0) {
+      console.warn('[Bot] Sell-half skipped — no SOL available above gas reserve');
+      return;
+    }
 
     console.log(`[Bot] Selling 50% of SOL position (${halfSol.toFixed(4)} SOL)${this.dryRun ? ' [DRY RUN]' : ''}`);
     const result = await this.executor.sellSol(halfSol, this.dryRun, price);
@@ -278,9 +297,23 @@ export class TradingBot {
     await this.notifier.sendTradeNotification(trade, this.dryRun);
   }
 
-  private async executeSellAll(signal: StrategySignal, price: number): Promise<void> {
-    const solToSell = this.position.solBalance;
+  private async executeSellAll(signal: StrategySignal, price: number, walletSolBalance?: number): Promise<void> {
+    let solToSell = this.position.solBalance;
     if (solToSell <= 0) return;
+
+    // Cap sell to leave gas reserve in wallet
+    if (!this.dryRun && walletSolBalance !== undefined) {
+      const minGas = this.cfg.capital.minSolReserveForGas;
+      const maxSellable = Math.max(0, walletSolBalance - minGas);
+      if (solToSell > maxSellable) {
+        console.warn(`[Bot] Sell-all capped from ${solToSell.toFixed(4)} to ${maxSellable.toFixed(4)} SOL to preserve gas reserve`);
+        solToSell = maxSellable;
+      }
+    }
+    if (solToSell <= 0) {
+      console.warn('[Bot] Sell-all skipped — no SOL available above gas reserve');
+      return;
+    }
 
     console.log(`[Bot] Selling entire SOL position (${solToSell.toFixed(4)} SOL)${this.dryRun ? ' [DRY RUN]' : ''}`);
     const result = await this.executor.sellSol(solToSell, this.dryRun, price);
