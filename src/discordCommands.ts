@@ -62,6 +62,9 @@ export class DiscordCommands {
           await msg.reply(this.buildTrades(isNaN(n) ? 5 : Math.min(n, 20)));
           break;
         }
+        case 'last':
+          await msg.reply(this.buildLastSignal());
+          break;
         case 'pnl':
           await msg.reply(this.buildPnl());
           break;
@@ -138,6 +141,37 @@ export class DiscordCommands {
     return `📋 **Last ${trades.length} Trade(s)**\n${lines.join('\n')}`;
   }
 
+  private buildLastSignal(): string {
+    const sig = this.logger.getLastSignal();
+    if (!sig) return '🔍 **Last Signal**\nNo signals recorded yet — bot hasn\'t run a cycle.';
+
+    const actionEmoji: Record<string, string> = {
+      hold: '⏸️',
+      buy_tier1: '🟢',
+      buy_tier2: '🟢',
+      buy_tier3: '🟢',
+      sell_half: '🟡',
+      sell_all: '🔴',
+    };
+    const emoji = actionEmoji[sig.action] ?? '❓';
+    const executed = sig.executed ? ' ✅ executed' : ' — held';
+    const date = new Date(sig.timestamp).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+
+    const rsi = sig.rsi4h !== null ? sig.rsi4h.toFixed(1) : 'n/a';
+    const vwap = sig.vwap4h !== null ? `$${sig.vwap4h.toFixed(4)}` : 'n/a';
+    const sma = sig.sma3d !== null ? `$${sig.sma3d.toFixed(4)}` : 'n/a';
+
+    return [
+      '🔍 **Last Signal**',
+      `${emoji} **${sig.action.toUpperCase()}**${executed}`,
+      `Trend: ${sig.trendBias}`,
+      `Price: $${sig.price.toFixed(4)}`,
+      `RSI(4h): ${rsi}  |  VWAP: ${vwap}  |  SMA(3d): ${sma}`,
+      `Reason: *${sig.reason}*`,
+      `Time: ${date}`,
+    ].join('\n');
+  }
+
   private buildPnl(): string {
     const total = this.logger.getTotalPnl();
     const emoji = total >= 0 ? '📈' : '📉';
@@ -150,6 +184,7 @@ export class DiscordCommands {
       '**SolBot Commands**',
       '`!solbot status` — online status, network, uptime',
       '`!solbot position` — current position & tiers',
+      '`!solbot last` — last signal (hold/buy/sell, trend, RSI, reason)',
       '`!solbot trades [n]` — last N trades (default 5, max 20)',
       '`!solbot pnl` — total realized P&L',
       '`!solbot help` — this message',

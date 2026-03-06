@@ -158,6 +158,24 @@ export class TradeLogger {
     }));
   }
 
+  getLastSignal(): { action: string; reason: string; price: number; rsi4h: number | null; vwap4h: number | null; sma3d: number | null; trendBias: string; executed: boolean; timestamp: number } | null {
+    const row = this.db.prepare(
+      'SELECT * FROM signals ORDER BY timestamp DESC LIMIT 1',
+    ).get() as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      action: row.action as string,
+      reason: row.reason as string,
+      price: row.price as number,
+      rsi4h: row.rsi_4h as number | null,
+      vwap4h: row.vwap_4h as number | null,
+      sma3d: row.sma_3d as number | null,
+      trendBias: row.trend_bias as string,
+      executed: Boolean(row.executed),
+      timestamp: row.timestamp as number,
+    };
+  }
+
   getTotalPnl(): number {
     const row = this.db.prepare('SELECT COALESCE(SUM(pnl), 0) as total FROM trades WHERE pnl IS NOT NULL').get() as { total: number };
     return row.total;
