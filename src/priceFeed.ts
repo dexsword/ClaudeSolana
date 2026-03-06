@@ -127,8 +127,10 @@ async function fetchHeliusCandles(
  * Fetch current SOL spot price in USDC via Jupiter price API.
  */
 export async function fetchSpotPrice(): Promise<number> {
-  const resp = await axios.get('https://price.jup.ag/v6/price', {
-    params: { ids: SOL_MINT, vsToken: USDC_MINT },
+  const apiKey = process.env.JUPITER_PRICE_API_KEY ?? '';
+  const resp = await axios.get('https://api.jup.ag/price/v3', {
+    params: { ids: SOL_MINT },
+    headers: { 'x-api-key': apiKey },
     timeout: 8000,
   });
 
