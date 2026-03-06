@@ -80,6 +80,7 @@ export class TradingBot {
       : balances.usdcBalance;
 
     console.log(`[Bot] Wallet — SOL: ${balances.solBalance.toFixed(4)} | USDC: ${balances.usdcBalance.toFixed(2)}${simulated ? ` (sim $${availableUSDC})` : ''} | Total: $${balances.totalValueUSDC.toFixed(2)}`);
+    this.logger.saveState('balances', { ...balances, updatedAt: now });
 
     // Circuit breaker compares real portfolio value against startingCapitalUSDC.
     // Skip it in dry-run devnet mode — the real wallet balance is irrelevant there.

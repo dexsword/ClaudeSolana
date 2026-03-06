@@ -83,11 +83,19 @@ export class DiscordCommands {
   private buildStatus(): string {
     const uptime = this.formatUptime(Date.now() - this.cfg.startTime.getTime());
     const mode = this.cfg.dryRun ? ' [DRY RUN]' : '';
+
+    const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number; totalValueUSDC: number; updatedAt: number }>('balances');
+    const balLine = bal
+      ? `SOL: ${bal.solBalance.toFixed(4)} | USDC: $${bal.usdcBalance.toFixed(2)} | Total: $${bal.totalValueUSDC.toFixed(2)}`
+      : 'Balance: not yet fetched';
+    const balAge = bal ? ` *(as of ${new Date(bal.updatedAt).toISOString().slice(11, 16)} UTC)*` : '';
+
     return [
       '🤖 **Bot Status**',
       `Status: 🟢 Online`,
       `Network: ${this.cfg.network}${mode}`,
       `Uptime: ${uptime}`,
+      `${balLine}${balAge}`,
     ].join('\n');
   }
 
