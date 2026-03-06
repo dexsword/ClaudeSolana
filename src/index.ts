@@ -69,6 +69,11 @@ console.log(`[Main] Wallet: ${executor.walletAddress}`);
 console.log(`[Main] Cron: ${cfg.scheduler.cronExpression}`);
 console.log(`[Main] Dry-run: ${dryRun}`);
 
+// ── Startup notification ─────────────────────────────────────────────────────
+const network = cfg.network.useDevnet ? 'DEVNET' : 'MAINNET';
+const mode = dryRun ? ' [DRY RUN]' : '';
+notifier.sendAlert(`🤖 Bot online — ${network}${mode}\nWallet: \`${executor.walletAddress}\`\nCron: \`${cfg.scheduler.cronExpression}\``).catch(() => {});
+
 // Run immediately
 if (testCycle) {
   if (!dryRun) {
