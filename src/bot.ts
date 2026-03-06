@@ -82,7 +82,9 @@ export class TradingBot {
 
     console.log(`[Bot] Wallet — SOL: ${balances.solBalance.toFixed(4)} | USDC: ${balances.usdcBalance.toFixed(2)}${simulated ? ` (sim $${availableUSDC})` : ''} | Total: $${balances.totalValueUSDC.toFixed(2)}`);
 
-    if (this.walletManager.isCircuitBreakerTripped(balances.totalValueUSDC, this.cfg)) {
+    // Circuit breaker compares real portfolio value against startingCapitalUSDC.
+    // Skip it in dry-run devnet mode — the real wallet balance is irrelevant there.
+    if (!simulated && this.walletManager.isCircuitBreakerTripped(balances.totalValueUSDC, this.cfg)) {
       this.circuitBreakerTripped = true;
       const msg = `Circuit breaker triggered! Portfolio value $${balances.totalValueUSDC.toFixed(2)} exceeds ${this.cfg.strategy.risk.circuitBreakerDrawdownPct}% drawdown`;
       console.error(`[Bot] ${msg}`);
