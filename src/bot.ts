@@ -70,7 +70,6 @@ export class TradingBot {
     this.position = updateTrailingStop(this.position, spotPrice, this.cfg);
 
     // ── 4. Circuit breaker check ────────────────────────────────────────────
-    const walletAddress = this.executor.walletAddress;
     const balances = await this.walletManager.getBalances(spotPrice);
 
     // In dry-run on devnet, substitute the configured starting capital so the
@@ -166,27 +165,29 @@ export class TradingBot {
       return;
     }
 
-    // Update position state
+    // Update position state — use actual execution price from swap, not the
+    // pre-slippage market price, so avg entry and stop-loss are accurate.
+    const execPrice = result.price;
     const prevSol = this.position.solBalance;
     const newSol = prevSol + result.outputAmount;
     const prevAvg = this.position.averageEntryPrice;
     const newAvg =
       prevSol === 0
-        ? price
-        : (prevAvg * prevSol + price * result.outputAmount) / newSol;
+        ? execPrice
+        : (prevAvg * prevSol + execPrice * result.outputAmount) / newSol;
 
     const tiers = { ...this.position.tiers };
     if (tier === 1) {
       tiers.tier1Filled = true;
-      tiers.tier1EntryPrice = price;
+      tiers.tier1EntryPrice = execPrice;
       tiers.tier1Amount = usdcToSpend;
     } else if (tier === 2) {
       tiers.tier2Filled = true;
-      tiers.tier2EntryPrice = price;
+      tiers.tier2EntryPrice = execPrice;
       tiers.tier2Amount = usdcToSpend;
     } else {
       tiers.tier3Filled = true;
-      tiers.tier3EntryPrice = price;
+      tiers.tier3EntryPrice = execPrice;
       tiers.tier3Amount = usdcToSpend;
     }
 
@@ -198,6 +199,7 @@ export class TradingBot {
       highWaterMark: Math.max(this.position.highWaterMark, price),
       tiers,
     };
+    this.logger.saveState('position', this.position);
 
     const trade: TradeRecord = {
       timestamp: Date.now(),
@@ -239,6 +241,7 @@ export class TradingBot {
       solBalance: this.position.solBalance - halfSol,
       partialExitDone: true,
     };
+    this.logger.saveState('position', this.position);
 
     const trade: TradeRecord = {
       timestamp: Date.now(),
@@ -282,8 +285,8 @@ export class TradingBot {
     const cooldownUntil = Date.now() + cooldownMs;
 
     // Reset position
-    this.position = buildInitialPosition();
-    this.position = { ...this.position, cooldownUntil };
+    this.position = { ...buildInitialPosition(), cooldownUntil };
+    this.logger.saveState('position', this.position);
 
     const trade: TradeRecord = {
       timestamp: Date.now(),

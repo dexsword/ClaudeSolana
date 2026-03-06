@@ -1,5 +1,5 @@
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { getAssociatedTokenAddress, getAccount } from '@solana/spl-token';
+import { getAssociatedTokenAddress, getAccount, TokenAccountNotFoundError, TokenInvalidAccountOwnerError } from '@solana/spl-token';
 import { BotConfig, PositionState } from './types';
 
 const USDC_MINT_MAINNET = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
@@ -40,9 +40,12 @@ export class WalletManager {
       const ata = await getAssociatedTokenAddress(this.usdcMint, this.walletPubkey);
       const account = await getAccount(this.connection, ata);
       return Number(account.amount) / 10 ** USDC_DECIMALS;
-    } catch {
-      // ATA may not exist if no USDC has ever been held
-      return 0;
+    } catch (err) {
+      // ATA not yet created — normal when wallet has never held this token
+      if (err instanceof TokenAccountNotFoundError || err instanceof TokenInvalidAccountOwnerError) {
+        return 0;
+      }
+      throw err; // re-throw real RPC/network errors
     }
   }
 
