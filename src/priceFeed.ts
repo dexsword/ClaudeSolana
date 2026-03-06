@@ -75,8 +75,8 @@ async function fetchBirdeyeCandles(
 }
 
 /**
- * Minimal Helius/CoinGecko fallback — builds synthetic candles from price history.
- * In production you would use a proper OHLCV feed; this is a best-effort fallback.
+ * Minimal CoinGecko fallback — builds synthetic OHLCV candles.
+ * Fetches OHLC and volume data in parallel, merging volume into each bucket.
  */
 async function fetchHeliusCandles(
   timeframe: string,
@@ -84,23 +84,23 @@ async function fetchHeliusCandles(
   intervalSeconds: number,
   nowSeconds: number,
 ): Promise<Candle[]> {
-  // Use CoinGecko public endpoint as fallback (no key needed for basic data)
   const rawDays = Math.ceil((intervalSeconds * limit) / 86400);
   const validDays = [1, 7, 14, 30, 90, 180, 365];
   const days = validDays.find(d => d >= rawDays) ?? 365;
-  const resp = await axios.get(
-    `https://api.coingecko.com/api/v3/coins/solana/ohlc?vs_currency=usd&days=${days}`,
-    { timeout: 10000 },
-  );
+  const baseUrl = 'https://api.coingecko.com/api/v3/coins/solana';
 
-  if (!Array.isArray(resp.data)) throw new Error('Unexpected CoinGecko response');
+  const [ohlcResp, chartResp] = await Promise.all([
+    axios.get(`${baseUrl}/ohlc?vs_currency=usd&days=${days}`, { timeout: 10000 }),
+    axios.get(`${baseUrl}/market_chart?vs_currency=usd&days=${days}`, { timeout: 10000 }),
+  ]);
 
-  // CoinGecko returns [timestamp, open, high, low, close] arrays in native tf
-  // Group into target timeframe buckets
+  if (!Array.isArray(ohlcResp.data)) throw new Error('Unexpected CoinGecko OHLC response');
+
   const bucketMs = intervalSeconds * 1000;
   const buckets = new Map<number, { open: number; high: number; low: number; close: number; volume: number }>();
 
-  for (const [ts, open, high, low, close] of resp.data) {
+  // Build OHLC buckets (CoinGecko returns [timestamp, open, high, low, close])
+  for (const [ts, open, high, low, close] of ohlcResp.data) {
     const bucket = Math.floor(ts / bucketMs) * bucketMs;
     const existing = buckets.get(bucket);
     if (!existing) {
@@ -109,6 +109,16 @@ async function fetchHeliusCandles(
       existing.high = Math.max(existing.high, high);
       existing.low = Math.min(existing.low, low);
       existing.close = close;
+    }
+  }
+
+  // Merge volume data (market_chart returns { total_volumes: [[timestamp, volume], ...] })
+  const totalVolumes: [number, number][] = chartResp.data?.total_volumes ?? [];
+  for (const [ts, vol] of totalVolumes) {
+    const bucket = Math.floor(ts / bucketMs) * bucketMs;
+    const existing = buckets.get(bucket);
+    if (existing) {
+      existing.volume += vol;
     }
   }
 
