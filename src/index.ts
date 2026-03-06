@@ -20,6 +20,7 @@ const cfg: BotConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 // ── Parse CLI flags ──────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
+const testCycle = args.includes('--test-cycle');
 
 if (dryRun) console.log('[Main] *** DRY-RUN MODE — no real transactions will be sent ***');
 
@@ -69,11 +70,26 @@ console.log(`[Main] Cron: ${cfg.scheduler.cronExpression}`);
 console.log(`[Main] Dry-run: ${dryRun}`);
 
 // Run immediately
-runTick().then(() => {
-  // Schedule subsequent runs
-  cron.schedule(cfg.scheduler.cronExpression, runTick, { timezone: 'UTC' });
-  console.log(`[Main] Scheduler active — next runs on cron: ${cfg.scheduler.cronExpression}`);
-});
+if (testCycle) {
+  if (!dryRun) {
+    console.error('[Main] --test-cycle requires --dry-run');
+    process.exit(1);
+  }
+  bot.runTestCycle().then(() => {
+    logger.close();
+    process.exit(0);
+  }).catch(err => {
+    console.error('[Main] Test cycle error:', err);
+    logger.close();
+    process.exit(1);
+  });
+} else {
+  runTick().then(() => {
+    // Schedule subsequent runs
+    cron.schedule(cfg.scheduler.cronExpression, runTick, { timezone: 'UTC' });
+    console.log(`[Main] Scheduler active — next runs on cron: ${cfg.scheduler.cronExpression}`);
+  });
+}
 
 // Graceful shutdown
 process.on('SIGINT', () => {

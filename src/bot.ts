@@ -317,4 +317,66 @@ export class TradingBot {
     this.circuitBreakerTripped = false;
     console.log('[Bot] Circuit breaker manually reset');
   }
+
+  /**
+   * Force a full buy_tier1 → sell_all cycle using live quotes.
+   * Only callable when dryRun=true. Used to smoke-test the trade path
+   * without waiting for real strategy signals.
+   */
+  async runTestCycle(): Promise<void> {
+    if (!this.dryRun) {
+      console.error('[Bot] runTestCycle refused — only allowed in dry-run mode');
+      return;
+    }
+
+    console.log('\n[Bot] ══ TEST CYCLE START ══');
+
+    const birdeyeKey = process.env.BIRDEYE_API_KEY ?? '';
+    const [candles4h, candles3d, spotPrice] = await Promise.all([
+      fetchCandles('4h', 100, birdeyeKey),
+      fetchCandles('3d', 60, birdeyeKey),
+      fetchSpotPrice(),
+    ]);
+
+    const { rsi4h, vwap4h, sma3d } = getLatestIndicators(
+      candles4h,
+      candles3d,
+      this.cfg.strategy.rsi.period,
+      this.cfg.strategy.sma.period,
+    );
+
+    console.log(`[Bot] Spot: $${spotPrice.toFixed(4)} | RSI: ${rsi4h?.toFixed(2) ?? 'N/A'} | VWAP: ${vwap4h?.toFixed(4) ?? 'N/A'} | SMA50: ${sma3d?.toFixed(4) ?? 'N/A'}`);
+
+    const availableUSDC = this.cfg.network.useDevnet
+      ? this.cfg.capital.startingCapitalUSDC
+      : (await this.walletManager.getBalances(spotPrice)).usdcBalance;
+
+    const buySignal: StrategySignal = {
+      action: 'buy_tier1',
+      reason: 'test-cycle forced buy',
+      price: spotPrice,
+      rsi4h,
+      vwap4h,
+      sma3d,
+      trendBias: 'neutral',
+    };
+
+    console.log('[Bot] Step 1/2 — forcing buy_tier1...');
+    await this.executeBuy(1, availableUSDC, buySignal, spotPrice);
+
+    const sellSignal: StrategySignal = {
+      action: 'sell_all',
+      reason: 'test-cycle forced sell',
+      price: spotPrice,
+      rsi4h,
+      vwap4h,
+      sma3d,
+      trendBias: 'neutral',
+    };
+
+    console.log('[Bot] Step 2/2 — forcing sell_all...');
+    await this.executeSellAll(sellSignal, spotPrice);
+
+    console.log('[Bot] ══ TEST CYCLE COMPLETE ══\n');
+  }
 }
