@@ -2,10 +2,10 @@
   "strategy": {
     "rsi": {
       "period": 14,
-      "tier1BuyThreshold": 30,
-      "tier2BuyThreshold": 25,
-      "tier3BuyThreshold": 20,
-      "sellThreshold": 70,
+      "tier1BuyThreshold": 35,
+      "tier2BuyThreshold": 31,
+      "tier3BuyThreshold": 23,
+      "sellThreshold": 68,
       "extendedSellThreshold": 80,
       "bearishBuyThreshold": 20,
       "neutralBuyThreshold": 25
@@ -28,9 +28,9 @@
       "tier3AllocationPct": 34
     },
     "risk": {
-      "stopLossPct": 8,
+      "stopLossPct": 13,
       "trailingStopActivationPct": 10,
-      "trailingStopPct": 5,
+      "trailingStopPct": 7,
       "circuitBreakerDrawdownPct": 30,
       "maxSlippagePct": 2
     },
@@ -40,18 +40,18 @@
     }
   },
   "capital": {
-    "startingCapitalUSDC": 1000
+    "startingCapitalUSDC": 77
   },
   "timeframes": {
     "executionTf": "4h",
     "trendTf": "3d"
   },
   "network": {
-    "useDevnet": true,
+    "useDevnet": false,
     "rpcEndpoint": "https://api.devnet.solana.com"
   },
   "notifications": {
-    "enabled": false,
+    "enabled": true,
     "webhookUrl": "",
     "type": "discord"
   },
