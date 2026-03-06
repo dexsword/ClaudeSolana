@@ -135,6 +135,7 @@ export interface BotConfig {
     enabled: boolean;
     webhookUrl: string;
     type: string;
+    botToken?: string;
   };
   scheduler: {
     cronExpression: string;

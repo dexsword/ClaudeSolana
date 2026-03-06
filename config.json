@@ -53,7 +53,8 @@
   "notifications": {
     "enabled": true,
     "webhookUrl": "",
-    "type": "discord"
+    "type": "discord",
+    "botToken": ""
   },
   "scheduler": {
     "cronExpression": "0 * * * *",

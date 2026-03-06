@@ -8,6 +8,7 @@ import { TradeExecutor } from './executor';
 import { WalletManager } from './walletManager';
 import { TradeLogger } from './logger';
 import { Notifier } from './notifications';
+import { DiscordCommands } from './discordCommands';
 
 // ── Load config ──────────────────────────────────────────────────────────────
 const configPath = path.resolve(__dirname, '..', 'config.json');
@@ -52,6 +53,28 @@ const notifier = new Notifier({
 });
 
 const bot = new TradingBot(cfg, executor, walletManager, logger, notifier, dryRun);
+
+// ── Discord command bot ───────────────────────────────────────────────────────
+const startTime = new Date();
+const discordBotToken = process.env.DISCORD_BOT_TOKEN ?? cfg.notifications.botToken ?? '';
+let discordCommands: DiscordCommands | null = null;
+
+if (discordBotToken) {
+  discordCommands = new DiscordCommands(
+    {
+      botToken: discordBotToken,
+      dryRun,
+      network: cfg.network.useDevnet ? 'DEVNET' : 'MAINNET',
+      startTime,
+    },
+    logger,
+  );
+  discordCommands.start().catch((err) => {
+    console.warn('[Discord] Failed to start command bot:', (err as Error).message);
+  });
+} else {
+  console.log('[Discord] No DISCORD_BOT_TOKEN set — command bot disabled');
+}
 
 // ── Run immediately on start, then on cron ───────────────────────────────────
 async function runTick(): Promise<void> {
@@ -99,11 +122,13 @@ if (testCycle) {
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[Main] Shutting down...');
+  discordCommands?.destroy();
   logger.close();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
+  discordCommands?.destroy();
   logger.close();
   process.exit(0);
 });
