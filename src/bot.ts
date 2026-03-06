@@ -72,7 +72,15 @@ export class TradingBot {
     // ── 4. Circuit breaker check ────────────────────────────────────────────
     const walletAddress = this.executor.walletAddress;
     const balances = await this.walletManager.getBalances(spotPrice);
-    console.log(`[Bot] Wallet — SOL: ${balances.solBalance.toFixed(4)} | USDC: ${balances.usdcBalance.toFixed(2)} | Total: $${balances.totalValueUSDC.toFixed(2)}`);
+
+    // In dry-run on devnet, substitute the configured starting capital so the
+    // full trade cycle can be exercised without needing real devnet USDC.
+    const simulated = this.dryRun && this.cfg.network.useDevnet;
+    const availableUSDC = simulated
+      ? this.cfg.capital.startingCapitalUSDC
+      : balances.usdcBalance;
+
+    console.log(`[Bot] Wallet — SOL: ${balances.solBalance.toFixed(4)} | USDC: ${balances.usdcBalance.toFixed(2)}${simulated ? ` (sim $${availableUSDC})` : ''} | Total: $${balances.totalValueUSDC.toFixed(2)}`);
 
     if (this.walletManager.isCircuitBreakerTripped(balances.totalValueUSDC, this.cfg)) {
       this.circuitBreakerTripped = true;
@@ -111,13 +119,13 @@ export class TradingBot {
     // ── 6. Execute signal ───────────────────────────────────────────────────
     switch (signal.action) {
       case 'buy_tier1':
-        await this.executeBuy(1, balances.usdcBalance, signal, spotPrice);
+        await this.executeBuy(1, availableUSDC, signal, spotPrice);
         break;
       case 'buy_tier2':
-        await this.executeBuy(2, balances.usdcBalance, signal, spotPrice);
+        await this.executeBuy(2, availableUSDC, signal, spotPrice);
         break;
       case 'buy_tier3':
-        await this.executeBuy(3, balances.usdcBalance, signal, spotPrice);
+        await this.executeBuy(3, availableUSDC, signal, spotPrice);
         break;
       case 'sell_half':
         await this.executeSellHalf(signal, spotPrice);
