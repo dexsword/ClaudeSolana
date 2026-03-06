@@ -134,8 +134,7 @@ export async function fetchSpotPrice(): Promise<number> {
     timeout: 8000,
   });
 
-  console.log('[DEBUG Jupiter]', JSON.stringify(resp.data));
-  const price = resp.data?.data?.[SOL_MINT]?.usdPrice;
+  const price = resp.data?.[SOL_MINT]?.usdPrice;
   if (!price) throw new Error('Could not fetch spot price from Jupiter');
   return price;
 }
