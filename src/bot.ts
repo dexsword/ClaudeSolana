@@ -82,6 +82,18 @@ export class TradingBot {
     console.log(`[Bot] Wallet — SOL: ${balances.solBalance.toFixed(4)} | USDC: ${balances.usdcBalance.toFixed(2)}${simulated ? ` (sim $${availableUSDC})` : ''} | Total: $${balances.totalValueUSDC.toFixed(2)}`);
     this.logger.saveState('balances', { ...balances, updatedAt: now });
 
+    // ── Gas reserve check ────────────────────────────────────────────────────
+    // Gas buffer = total SOL in wallet minus the SOL the bot holds as a position.
+    // Only the gas buffer should cover transaction fees; position SOL gets sold normally.
+    const minGas = this.cfg.capital.minSolReserveForGas;
+    const gasBuffer = balances.solBalance - this.position.solBalance;
+    if (!simulated && gasBuffer < minGas) {
+      const msg = `⚠️ Low gas warning! Gas buffer ${gasBuffer.toFixed(4)} SOL is below minimum ${minGas} SOL — trading paused until topped up`;
+      console.warn(`[Bot] ${msg}`);
+      await this.notifier.sendAlert(msg);
+      return;
+    }
+
     // Circuit breaker compares real portfolio value against startingCapitalUSDC.
     // Skip it in dry-run devnet mode — the real wallet balance is irrelevant there.
     if (!simulated && this.walletManager.isCircuitBreakerTripped(balances.totalValueUSDC, this.cfg)) {

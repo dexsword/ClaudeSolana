@@ -40,7 +40,8 @@
     }
   },
   "capital": {
-    "startingCapitalUSDC": 77
+    "startingCapitalUSDC": 77,
+    "minSolReserveForGas": 0.05
   },
   "timeframes": {
     "executionTf": "4h",

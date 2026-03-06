@@ -122,6 +122,7 @@ export interface BotConfig {
   };
   capital: {
     startingCapitalUSDC: number;
+    minSolReserveForGas: number; // SOL — bot halts trading if gas buffer drops below this
   };
   timeframes: {
     executionTf: string;
