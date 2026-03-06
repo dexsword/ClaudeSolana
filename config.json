@@ -56,7 +56,7 @@
     "type": "discord"
   },
   "scheduler": {
-    "cronExpression": "0 0,4,8,12,16,20 * * *",
+    "cronExpression": "0 * * * *",
     "alignToCandle": true
   }
 }
