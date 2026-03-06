@@ -25,11 +25,11 @@ export class DiscordCommands {
       ],
     });
 
-    this.client.on('messageCreate', (msg) => this.handleMessage(msg));
+    this.client.on('messageCreate', (msg: Message) => this.handleMessage(msg));
     this.client.on('ready', () => {
       console.log(`[Discord] Command bot logged in as ${this.client.user?.tag}`);
     });
-    this.client.on('error', (err) => {
+    this.client.on('error', (err: Error) => {
       console.warn('[Discord] Client error:', err.message);
     });
   }
