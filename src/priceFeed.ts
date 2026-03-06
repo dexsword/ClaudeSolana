@@ -128,7 +128,7 @@ async function fetchHeliusCandles(
  */
 export async function fetchSpotPrice(): Promise<number> {
   const apiKey = process.env.JUPITER_PRICE_API_KEY ?? '';
-  const resp = await axios.get('https://api.jup.ag/price/v3', {
+  const resp = await axios.get('https://api.jup.ag/price/v3/price', {
     params: { ids: SOL_MINT },
     headers: { 'x-api-key': apiKey },
     timeout: 8000,
