@@ -1,6 +1,6 @@
 {
   "name": "solana-swing-bot",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Solana RSI+VWAP swing trading bot",
   "main": "dist/index.js",
   "scripts": {

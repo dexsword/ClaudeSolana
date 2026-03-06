@@ -1,0 +1,15 @@
+services:
+  solana-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # SQLite database persists across container restarts and updates
+      - ./data:/app/data
+      # Edit config.json on the host without rebuilding the image
+      - ./config.json:/app/config.json:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
