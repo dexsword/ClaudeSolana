@@ -159,7 +159,7 @@ export class TradingBot {
     }
 
     console.log(`[Bot] Buying SOL with $${usdcToSpend.toFixed(2)} USDC (Tier ${tier})${this.dryRun ? ' [DRY RUN]' : ''}`);
-    const result = await this.executor.buySol(usdcToSpend, this.dryRun);
+    const result = await this.executor.buySol(usdcToSpend, this.dryRun, price);
 
     if (!result.success) {
       console.error(`[Bot] Buy failed: ${result.error}`);
@@ -226,7 +226,7 @@ export class TradingBot {
     if (halfSol <= 0) return;
 
     console.log(`[Bot] Selling 50% of SOL position (${halfSol.toFixed(4)} SOL)${this.dryRun ? ' [DRY RUN]' : ''}`);
-    const result = await this.executor.sellSol(halfSol, this.dryRun);
+    const result = await this.executor.sellSol(halfSol, this.dryRun, price);
 
     if (!result.success) {
       console.error(`[Bot] Sell-half failed: ${result.error}`);
@@ -267,7 +267,7 @@ export class TradingBot {
     if (solToSell <= 0) return;
 
     console.log(`[Bot] Selling entire SOL position (${solToSell.toFixed(4)} SOL)${this.dryRun ? ' [DRY RUN]' : ''}`);
-    const result = await this.executor.sellSol(solToSell, this.dryRun);
+    const result = await this.executor.sellSol(solToSell, this.dryRun, price);
 
     if (!result.success) {
       console.error(`[Bot] Sell-all failed: ${result.error}`);

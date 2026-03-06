@@ -26,11 +26,16 @@ export class TradeExecutor {
 
   /**
    * Buy SOL with `usdcAmount` USDC.
-   * If dryRun=true, fetches a quote but does not broadcast the transaction.
+   * If dryRun=true, skips the Jupiter API call and simulates output from
+   * the provided spot price (no network required for dry-run testing).
    */
-  async buySol(usdcAmount: number, dryRun: boolean): Promise<SwapResult> {
-    const inputAmountRaw = Math.round(usdcAmount * 10 ** USDC_DECIMALS);
+  async buySol(usdcAmount: number, dryRun: boolean, spotPrice?: number): Promise<SwapResult> {
+    if (dryRun && spotPrice) {
+      const outputSol = usdcAmount / spotPrice;
+      return { success: true, txSignature: null, inputAmount: usdcAmount, outputAmount: outputSol, price: spotPrice };
+    }
 
+    const inputAmountRaw = Math.round(usdcAmount * 10 ** USDC_DECIMALS);
     try {
       const quote = await this.getQuote(USDC_MINT, SOL_MINT, inputAmountRaw);
       const outputSol = Number(quote.outAmount) / 10 ** SOL_DECIMALS;
@@ -49,10 +54,16 @@ export class TradeExecutor {
 
   /**
    * Sell `solAmount` SOL for USDC.
+   * If dryRun=true, skips the Jupiter API call and simulates output from
+   * the provided spot price (no network required for dry-run testing).
    */
-  async sellSol(solAmount: number, dryRun: boolean): Promise<SwapResult> {
-    const inputAmountRaw = Math.round(solAmount * 10 ** SOL_DECIMALS);
+  async sellSol(solAmount: number, dryRun: boolean, spotPrice?: number): Promise<SwapResult> {
+    if (dryRun && spotPrice) {
+      const outputUsdc = solAmount * spotPrice;
+      return { success: true, txSignature: null, inputAmount: solAmount, outputAmount: outputUsdc, price: spotPrice };
+    }
 
+    const inputAmountRaw = Math.round(solAmount * 10 ** SOL_DECIMALS);
     try {
       const quote = await this.getQuote(SOL_MINT, USDC_MINT, inputAmountRaw);
       const outputUsdc = Number(quote.outAmount) / 10 ** USDC_DECIMALS;
