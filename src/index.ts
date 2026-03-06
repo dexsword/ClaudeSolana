@@ -40,7 +40,7 @@ const logger = new TradeLogger(dbPath);
 
 const executor = new TradeExecutor(rpcUrl, privateKey, cfg.strategy.risk.maxSlippagePct);
 
-const walletManager = new WalletManager(rpcUrl, executor.walletAddress);
+const walletManager = new WalletManager(rpcUrl, executor.walletAddress, cfg.network.useDevnet);
 
 const notifier = new Notifier({
   enabled: cfg.notifications.enabled,
