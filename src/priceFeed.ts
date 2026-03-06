@@ -85,9 +85,11 @@ async function fetchHeliusCandles(
   nowSeconds: number,
 ): Promise<Candle[]> {
   // Use CoinGecko public endpoint as fallback (no key needed for basic data)
-  const days = Math.ceil((intervalSeconds * limit) / 86400);
+  const rawDays = Math.ceil((intervalSeconds * limit) / 86400);
+  const validDays = [1, 7, 14, 30, 90, 180, 365];
+  const days = validDays.find(d => d >= rawDays) ?? 365;
   const resp = await axios.get(
-    `https://api.coingecko.com/api/v3/coins/solana/ohlc?vs_currency=usd&days=${Math.min(days, 365)}`,
+    `https://api.coingecko.com/api/v3/coins/solana/ohlc?vs_currency=usd&days=${days}`,
     { timeout: 10000 },
   );
 
