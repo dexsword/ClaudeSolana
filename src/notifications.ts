@@ -39,13 +39,25 @@ export class Notifier {
 
   async sendSignalNotification(signal: StrategySignal): Promise<void> {
     if (!this.cfg.enabled) return;
-    if (signal.action === 'hold') return; // suppress hold signals
+
+    const actionEmoji: Record<string, string> = {
+      hold: '⏸️',
+      bootstrap: '🚀',
+      rebalance_buy: '🟢',
+      rebalance_sell: '🟡',
+      emergency_sell: '🔴',
+    };
+    const emoji = actionEmoji[signal.action] ?? '❓';
+
+    const rsi = signal.rsi4h !== null ? `${signal.rsi4h.toFixed(1)} (${signal.rsiDirection})` : 'N/A';
+    const vwapDev = signal.rsi4h !== null && signal.vwap4h !== null
+      ? ` | VWAP dev: ${(((signal.price - signal.vwap4h) / signal.vwap4h) * 100).toFixed(1)}%`
+      : '';
 
     const message = [
-      `📊 **Signal: ${signal.action.toUpperCase()}**`,
-      `Price: $${signal.price.toFixed(4)}`,
-      `RSI: ${signal.rsi4h?.toFixed(1) ?? 'N/A'} | VWAP: $${signal.vwap4h?.toFixed(4) ?? 'N/A'}`,
-      `Trend bias: ${signal.trendBias}`,
+      `${emoji} **${signal.action.toUpperCase()}** — Zone: ${signal.zone} [${signal.trendBias}]`,
+      `Price: $${signal.price.toFixed(4)} | RSI: ${rsi}${vwapDev}`,
+      `Target: ${signal.targetSolPct}% SOL`,
       `Reason: ${signal.reason}`,
     ].join('\n');
 
