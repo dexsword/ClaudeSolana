@@ -15,6 +15,8 @@ export interface IndicatorResult {
 
 export type TrendBias = 'bullish' | 'neutral' | 'bearish';
 
+export type RsiDirection = 'rising' | 'falling' | 'flat';
+
 export interface PositionState {
   bootstrapDone: boolean;          // has the initial 50% SOL buy been executed?
   solBalance: number;              // SOL held by bot (excludes gas reserve)
@@ -22,7 +24,14 @@ export interface PositionState {
   highWaterMark: number;           // highest price seen while holding SOL
   trailingStopActive: boolean;
   trailingStopPrice: number | null;
-  cooldownUntil: number | null;    // Unix ms — brief pause after emergency_sell
+  cooldownUntil: number | null;    // Unix ms — pause after emergency_sell
+
+  // Zone hysteresis: tracks how many consecutive candles the current zone has held
+  pendingZone: string | null;
+  pendingZoneCount: number;
+
+  // After an emergency exit, require RSI to reach oversold before rebuilding
+  requireOversoldRecovery: boolean;
 }
 
 export interface StrategySignal {
@@ -33,8 +42,9 @@ export interface StrategySignal {
   vwap4h: number | null;
   sma3d: number | null;
   trendBias: TrendBias;
-  zone: string;         // which allocation zone we're in (e.g. 'moderate_sell')
-  targetSolPct: number; // desired SOL % of managed portfolio (0-100)
+  zone: string;            // allocation zone name (e.g. 'moderate_sell')
+  targetSolPct: number;    // desired SOL % of managed portfolio (0–100)
+  rsiDirection: RsiDirection;
 }
 
 export interface TradeRecord {
@@ -45,7 +55,7 @@ export interface TradeRecord {
   solAmount: number;
   usdcAmount: number;
   price: number;
-  zone: string | null;      // replaced tier — which zone triggered this trade
+  zone: string | null;
   txSignature: string | null;
   dryRun: boolean;
   reason: string;
@@ -78,22 +88,32 @@ export interface BotConfig {
       neutralZonePct: number;
     };
     rebalance: {
-      bootstrapRsiThreshold: number;   // RSI must be below this to trigger initial 50% buy
-      driftThresholdPct: number;       // min SOL% drift from target before rebalancing
-      minTradeUSDC: number;            // min trade size in USDC to avoid fee drag
-      // Zone thresholds (RSI + VWAP deviation %):
-      strongBuyRsi: number;            // RSI below → strong buy zone
-      strongBuyVwapPct: number;        // price must be this % below VWAP
-      strongBuyTargetSolPct: number;   // target SOL% in strong buy
+      bootstrapRsiThreshold: number;
+      driftThresholdPct: number;
+      minTradeUSDC: number;
+
+      // Hysteresis: zone must hold this many consecutive candles before executing
+      zoneConfirmationCandles: number;
+
+      // Trend adjustment: shifts all zone SOL targets based on SMA trend bias
+      trendAdjustment: {
+        bullishSolBoostPct: number;  // add this % to all targets in bullish trend
+        bearishSolCutPct: number;    // subtract this % from all targets in bearish trend
+      };
+
+      // Zone thresholds
+      strongBuyRsi: number;
+      strongBuyVwapPct: number;
+      strongBuyTargetSolPct: number;
       moderateBuyRsi: number;
       moderateBuyVwapPct: number;
       moderateBuyTargetSolPct: number;
-      neutralTargetSolPct: number;     // target SOL% in neutral zone (also bootstrap target)
-      moderateSellRsi: number;         // RSI above → moderate sell zone
-      moderateSellVwapFloorPct: number; // price must not be more than this % below VWAP
+      neutralTargetSolPct: number;
+      moderateSellRsi: number;
+      moderateSellVwapFloorPct: number;
       moderateSellTargetSolPct: number;
       strongSellRsi: number;
-      strongSellVwapPct: number;       // price must be this % above VWAP
+      strongSellVwapPct: number;
       strongSellTargetSolPct: number;
     };
     risk: {
@@ -104,7 +124,7 @@ export interface BotConfig {
       maxSlippagePct: number;
     };
     cooldown: {
-      candlesAfterExit: number;
+      candlesAfterExit: number;      // applies to emergency exits only
       candleDurationMinutes: number;
     };
   };

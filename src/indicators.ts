@@ -92,14 +92,21 @@ export function calculateSMA(candles: Candle[], period: number = 50): (number | 
 }
 
 /**
- * Get the latest RSI, VWAP, and SMA values from candle arrays.
+ * Get the latest RSI, VWAP, SMA values and RSI momentum direction from candle arrays.
+ *
+ * rsiDirection compares the current RSI to the RSI two candles ago:
+ *   - 'rising'  → RSI increased by more than 1 point (price momentum upward)
+ *   - 'falling' → RSI decreased by more than 1 point (price momentum downward)
+ *   - 'flat'    → RSI change within ±1 point (no clear momentum)
+ *
+ * The 1-point threshold filters out noise so minor RSI wiggles don't flip direction.
  */
 export function getLatestIndicators(
   candles4h: Candle[],
   candles3d: Candle[],
   rsiPeriod: number = 14,
   smaPeriod: number = 50,
-): { rsi4h: number | null; vwap4h: number | null; sma3d: number | null } {
+): { rsi4h: number | null; vwap4h: number | null; sma3d: number | null; rsiDirection: 'rising' | 'falling' | 'flat' } {
   const rsiSeries = calculateRSI(candles4h, rsiPeriod);
   const vwapSeries = calculateVWAP(candles4h);
   const smaSeries = calculateSMA(candles3d, smaPeriod);
@@ -111,9 +118,30 @@ export function getLatestIndicators(
     return null;
   };
 
+  // Extract the two most recent non-null RSI values to determine direction
+  let rsi4h: number | null = null;
+  let rsiPrev: number | null = null;
+  let found = 0;
+  for (let i = rsiSeries.length - 1; i >= 0 && found < 2; i--) {
+    if (rsiSeries[i] !== null) {
+      if (found === 0) rsi4h = rsiSeries[i] as number;
+      else rsiPrev = rsiSeries[i] as number;
+      found++;
+    }
+  }
+
+  const RSI_DIRECTION_THRESHOLD = 1.0; // RSI points — below this is considered flat
+  let rsiDirection: 'rising' | 'falling' | 'flat' = 'flat';
+  if (rsi4h !== null && rsiPrev !== null) {
+    const delta = rsi4h - rsiPrev;
+    if (delta > RSI_DIRECTION_THRESHOLD) rsiDirection = 'rising';
+    else if (delta < -RSI_DIRECTION_THRESHOLD) rsiDirection = 'falling';
+  }
+
   return {
-    rsi4h: last(rsiSeries),
+    rsi4h,
     vwap4h: last(vwapSeries),
     sma3d: last(smaSeries),
+    rsiDirection,
   };
 }

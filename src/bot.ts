@@ -32,7 +32,7 @@ export class TradingBot {
     this.notifier = notifier;
     this.dryRun = dryRun;
 
-    // Load persisted position state, migrating from old tier-based format if needed
+    // Load persisted position, migrating from any previous format automatically
     const rawPosition = this.logger.loadState<Record<string, unknown>>('position');
     this.position = rawPosition ? migratePosition(rawPosition) : buildInitialPosition();
   }
@@ -57,20 +57,20 @@ export class TradingBot {
 
     console.log(`[Bot] Spot price: $${spotPrice.toFixed(4)} | 4h candles: ${candles4h.length} | 3d candles: ${candles3d.length}`);
 
-    // ── 2. Compute indicators ───────────────────────────────────────────────
-    const { rsi4h, vwap4h, sma3d } = getLatestIndicators(
+    // ── 2. Compute indicators (includes RSI direction) ──────────────────────
+    const { rsi4h, vwap4h, sma3d, rsiDirection } = getLatestIndicators(
       candles4h,
       candles3d,
       this.cfg.strategy.rsi.period,
       this.cfg.strategy.sma.period,
     );
 
-    console.log(`[Bot] RSI(4h): ${rsi4h?.toFixed(2) ?? 'N/A'} | VWAP(4h): ${vwap4h?.toFixed(4) ?? 'N/A'} | SMA50(3d): ${sma3d?.toFixed(4) ?? 'N/A'}`);
+    console.log(`[Bot] RSI(4h): ${rsi4h?.toFixed(2) ?? 'N/A'} (${rsiDirection}) | VWAP(4h): ${vwap4h?.toFixed(4) ?? 'N/A'} | SMA50(3d): ${sma3d?.toFixed(4) ?? 'N/A'}`);
 
     // ── 3. Update trailing stop ─────────────────────────────────────────────
     this.position = updateTrailingStop(this.position, spotPrice, this.cfg);
 
-    // ── 4. Fetch balances & check circuit breaker ───────────────────────────
+    // ── 4. Fetch balances & circuit breaker ────────────────────────────────
     const balances = await this.walletManager.getBalances(spotPrice);
 
     const simulated = this.dryRun && this.cfg.network.useDevnet;
@@ -81,7 +81,26 @@ export class TradingBot {
     console.log(`[Bot] Wallet — SOL: ${balances.solBalance.toFixed(4)} | USDC: ${balances.usdcBalance.toFixed(2)}${simulated ? ` (sim $${availableUSDC})` : ''} | Total: $${balances.totalValueUSDC.toFixed(2)}`);
     this.logger.saveState('balances', { ...balances, updatedAt: now });
 
-    // Gas reserve check: gas buffer = total wallet SOL minus bot-managed position SOL
+    // ── 5. Position reconciliation ─────────────────────────────────────────
+    // Compare what the bot thinks it holds against the actual wallet balance.
+    // If discrepancy > 5% AND > 0.01 SOL, adjust downward to reality.
+    // Only correct downward (tracked > actual) to avoid inflating position on gas top-ups.
+    if (this.position.bootstrapDone && !simulated && this.position.solBalance > 0) {
+      const maxManagedSol = Math.max(0, balances.solBalance - this.cfg.capital.minSolReserveForGas);
+      const trackedSol = this.position.solBalance;
+      const solDrift = trackedSol - maxManagedSol;
+
+      if (solDrift > 0.01 && (solDrift / trackedSol) > 0.05) {
+        const driftPct = (solDrift / trackedSol * 100).toFixed(1);
+        const msg = `Position reconciled: tracked ${trackedSol.toFixed(4)} SOL, actual ${maxManagedSol.toFixed(4)} SOL (${driftPct}% drift) — adjusting`;
+        console.warn(`[Bot] ${msg}`);
+        await this.notifier.sendAlert(msg);
+        this.position = { ...this.position, solBalance: maxManagedSol };
+        this.logger.saveState('position', this.position);
+      }
+    }
+
+    // Gas reserve check
     const minGas = this.cfg.capital.minSolReserveForGas;
     const gasBuffer = balances.solBalance - this.position.solBalance;
     const lowGas = !simulated && gasBuffer < minGas;
@@ -99,7 +118,7 @@ export class TradingBot {
       return;
     }
 
-    // ── 5. Compute current allocation ──────────────────────────────────────
+    // ── 6. Compute current allocation ──────────────────────────────────────
     const managedSolBalance = this.position.bootstrapDone ? this.position.solBalance : 0;
     const totalManagedUSDC = managedSolBalance * spotPrice + availableUSDC;
     const currentSolPct = this.walletManager.computeCurrentSolPct(
@@ -108,9 +127,9 @@ export class TradingBot {
       spotPrice,
     );
 
-    console.log(`[Bot] Allocation — Managed SOL: ${managedSolBalance.toFixed(4)} | SOL%: ${currentSolPct.toFixed(1)}% | Total managed: $${totalManagedUSDC.toFixed(2)} | Bootstrap: ${this.position.bootstrapDone ? '✓' : '✗'}`);
+    console.log(`[Bot] Allocation — SOL: ${managedSolBalance.toFixed(4)} (${currentSolPct.toFixed(1)}%) | Total managed: $${totalManagedUSDC.toFixed(2)} | Bootstrap: ${this.position.bootstrapDone ? '✓' : '✗'} | Recovery: ${this.position.requireOversoldRecovery ? '⚠️' : '✓'}`);
 
-    // ── 6. Evaluate strategy ────────────────────────────────────────────────
+    // ── 7. Evaluate strategy ────────────────────────────────────────────────
     const signal: StrategySignal = evaluateStrategy(
       spotPrice,
       rsi4h,
@@ -120,28 +139,67 @@ export class TradingBot {
       this.cfg,
       now,
       currentSolPct,
+      rsiDirection,
     );
 
-    console.log(`[Bot] Signal: ${signal.action.toUpperCase()} (${signal.zone}) — ${signal.reason}`);
+    // ── 8. Apply stateful filters (zone hysteresis + recovery gate) ─────────
+    // These are kept in bot.ts rather than strategy.ts to preserve strategy purity.
+    let effectiveAction = signal.action;
+
+    // Zone hysteresis: require zone to hold for N consecutive candles before executing.
+    // Applied to rebalance signals only — bootstrap and emergency exits bypass this.
+    if (effectiveAction === 'rebalance_buy' || effectiveAction === 'rebalance_sell') {
+      const confirmNeeded = this.cfg.strategy.rebalance.zoneConfirmationCandles;
+      if (confirmNeeded > 1) {
+        const sameZone = signal.zone === this.position.pendingZone;
+        const newCount = sameZone ? (this.position.pendingZoneCount ?? 0) + 1 : 1;
+        this.position = { ...this.position, pendingZone: signal.zone, pendingZoneCount: newCount };
+
+        if (newCount < confirmNeeded) {
+          effectiveAction = 'hold';
+          console.log(`[Bot] Zone hysteresis — ${signal.zone} (${newCount}/${confirmNeeded} candles confirmed)`);
+        } else {
+          console.log(`[Bot] Zone confirmed — ${signal.zone} (${newCount} candles) → proceeding`);
+        }
+      }
+    } else if (effectiveAction === 'bootstrap' || effectiveAction === 'emergency_sell') {
+      // Reset zone tracking on decisive actions so hysteresis starts fresh afterward
+      this.position = { ...this.position, pendingZone: null, pendingZoneCount: 0 };
+    }
+
+    // Oversold recovery gate: after an emergency exit, only allow re-buying when RSI
+    // has reached genuinely oversold territory (moderate_buy or strong_buy zone).
+    // This prevents buying back into a continuing dump on the first neutral candle.
+    if (this.position.requireOversoldRecovery && effectiveAction === 'rebalance_buy') {
+      if (signal.zone !== 'moderate_buy' && signal.zone !== 'strong_buy') {
+        effectiveAction = 'hold';
+        console.log(`[Bot] Recovery gate — zone '${signal.zone}' not oversold — waiting for moderate_buy or strong_buy`);
+      } else {
+        // Confirmed oversold entry — clear the gate
+        this.position = { ...this.position, requireOversoldRecovery: false };
+        console.log('[Bot] Recovery gate cleared — oversold zone confirmed, rebuilding position');
+      }
+    }
+
+    console.log(`[Bot] Signal: ${signal.action.toUpperCase()} (${signal.zone}) → effective: ${effectiveAction.toUpperCase()} — ${signal.reason}`);
     this.logger.logSignal({
       timestamp: now,
-      action: signal.action,
+      action: effectiveAction,
       reason: signal.reason,
       price: spotPrice,
       rsi4h,
       vwap4h,
       sma3d,
       trendBias: signal.trendBias,
-      executed: signal.action !== 'hold',
+      executed: effectiveAction !== 'hold',
     });
 
-    await this.notifier.sendSignalNotification(signal);
+    await this.notifier.sendSignalNotification({ ...signal, action: effectiveAction });
 
-    // ── 7. Execute signal ───────────────────────────────────────────────────
-    switch (signal.action) {
+    // ── 9. Execute signal ───────────────────────────────────────────────────
+    switch (effectiveAction) {
       case 'bootstrap': {
         if (lowGas) { console.warn('[Bot] Skipping bootstrap — gas reserve too low'); break; }
-        // Buy neutral target % (50%) of available USDC
         const usdcToSpend = availableUSDC * (signal.targetSolPct / 100);
         await this.executeRebalanceBuy(usdcToSpend, signal, spotPrice, true);
         break;
@@ -197,13 +255,13 @@ export class TradingBot {
         break;
     }
 
-    // ── 8. Persist state ────────────────────────────────────────────────────
+    // ── 10. Persist state ───────────────────────────────────────────────────
     this.logger.saveState('position', this.position);
   }
 
   /**
    * Buy SOL with USDC and update position.
-   * @param isBootstrap  True on the initial 50% buy — sets bootstrapDone = true.
+   * @param isBootstrap  True on the initial buy — sets bootstrapDone = true.
    */
   private async executeRebalanceBuy(
     usdcToSpend: number,
@@ -265,8 +323,8 @@ export class TradingBot {
 
   /**
    * Sell SOL to USDC and update position.
-   * @param isEmergency  True for stop loss / trailing stop — sets a brief cooldown
-   *                     and resets the trailing stop state.
+   * @param isEmergency  True for stop loss / trailing stop — sets a cooldown,
+   *                     resets trailing stop, and requires oversold recovery before re-buying.
    */
   private async executeRebalanceSell(
     solToSell: number,
@@ -285,7 +343,7 @@ export class TradingBot {
       const minGas = this.cfg.capital.minSolReserveForGas;
       const maxSellable = Math.max(0, walletSolBalance - minGas);
       if (solToSell > maxSellable) {
-        console.warn(`[Bot] Sell capped from ${solToSell.toFixed(4)} to ${maxSellable.toFixed(4)} SOL (gas reserve protection)`);
+        console.warn(`[Bot] Sell capped from ${solToSell.toFixed(4)} to ${maxSellable.toFixed(4)} SOL (gas reserve)`);
         solToSell = maxSellable;
       }
     }
@@ -312,17 +370,21 @@ export class TradingBot {
     };
 
     if (isEmergency) {
-      // Reset trailing stop and set brief cooldown so we don't immediately re-enter
+      // Extended cooldown after emergency exit (3 candles = 12 hours)
       const cooldownMs = this.cfg.strategy.cooldown.candlesAfterExit
         * this.cfg.strategy.cooldown.candleDurationMinutes * 60 * 1000;
       updatedPosition = {
         ...updatedPosition,
         trailingStopActive: false,
         trailingStopPrice: null,
-        highWaterMark: price,         // reset HWM to current price for fresh tracking
+        highWaterMark: price,           // reset HWM — track from current price on rebuild
         cooldownUntil: Date.now() + cooldownMs,
+        requireOversoldRecovery: true,  // only rebuild from genuine oversold signal
+        pendingZone: null,              // reset hysteresis — start fresh on re-entry
+        pendingZoneCount: 0,
       };
-      console.log(`[Bot] Emergency exit — cooldown until ${new Date(Date.now() + cooldownMs).toISOString()}`);
+      const cooldownUntil = new Date(Date.now() + cooldownMs);
+      console.log(`[Bot] Emergency exit — cooldown until ${cooldownUntil.toISOString()} | Recovery gate: active`);
     }
 
     this.position = updatedPosition;
@@ -352,8 +414,7 @@ export class TradingBot {
 
   private calculatePnl(solAmount: number, usdcReceived: number): number {
     if (this.position.averageEntryPrice <= 0) return 0;
-    const costBasis = solAmount * this.position.averageEntryPrice;
-    return usdcReceived - costBasis;
+    return usdcReceived - (solAmount * this.position.averageEntryPrice);
   }
 
   resetCircuitBreaker(): void {
@@ -380,14 +441,14 @@ export class TradingBot {
       fetchSpotPrice(),
     ]);
 
-    const { rsi4h, vwap4h, sma3d } = getLatestIndicators(
+    const { rsi4h, vwap4h, sma3d, rsiDirection } = getLatestIndicators(
       candles4h,
       candles3d,
       this.cfg.strategy.rsi.period,
       this.cfg.strategy.sma.period,
     );
 
-    console.log(`[Bot] Spot: $${spotPrice.toFixed(4)} | RSI: ${rsi4h?.toFixed(2) ?? 'N/A'} | VWAP: ${vwap4h?.toFixed(4) ?? 'N/A'} | SMA50: ${sma3d?.toFixed(4) ?? 'N/A'}`);
+    console.log(`[Bot] Spot: $${spotPrice.toFixed(4)} | RSI: ${rsi4h?.toFixed(2) ?? 'N/A'} (${rsiDirection}) | VWAP: ${vwap4h?.toFixed(4) ?? 'N/A'}`);
 
     const availableUSDC = this.cfg.network.useDevnet
       ? this.cfg.capital.startingCapitalUSDC
@@ -395,7 +456,7 @@ export class TradingBot {
 
     const buySignal: StrategySignal = {
       action: 'bootstrap',
-      reason: 'test-cycle forced bootstrap buy',
+      reason: 'test-cycle forced bootstrap',
       price: spotPrice,
       rsi4h,
       vwap4h,
@@ -403,9 +464,10 @@ export class TradingBot {
       trendBias: 'neutral',
       zone: 'test',
       targetSolPct: 50,
+      rsiDirection,
     };
 
-    console.log('[Bot] Step 1/2 — forcing bootstrap buy (50% of USDC)...');
+    console.log('[Bot] Step 1/2 — forcing bootstrap buy (50%)...');
     await this.executeRebalanceBuy(availableUSDC * 0.5, buySignal, spotPrice, true);
 
     const sellSignal: StrategySignal = {
@@ -418,6 +480,7 @@ export class TradingBot {
       trendBias: 'neutral',
       zone: 'test',
       targetSolPct: 0,
+      rsiDirection,
     };
 
     console.log('[Bot] Step 2/2 — forcing full rebalance sell...');

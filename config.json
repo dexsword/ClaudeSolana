@@ -14,16 +14,28 @@
       "bootstrapRsiThreshold": 62,
       "driftThresholdPct": 7,
       "minTradeUSDC": 3,
+
+      "zoneConfirmationCandles": 2,
+
+      "trendAdjustment": {
+        "bullishSolBoostPct": 10,
+        "bearishSolCutPct": 12
+      },
+
       "strongBuyRsi": 28,
       "strongBuyVwapPct": 4,
       "strongBuyTargetSolPct": 75,
+
       "moderateBuyRsi": 40,
       "moderateBuyVwapPct": 2,
       "moderateBuyTargetSolPct": 62,
+
       "neutralTargetSolPct": 50,
+
       "moderateSellRsi": 62,
       "moderateSellVwapFloorPct": 1,
       "moderateSellTargetSolPct": 38,
+
       "strongSellRsi": 72,
       "strongSellVwapPct": 2,
       "strongSellTargetSolPct": 25
@@ -36,7 +48,7 @@
       "maxSlippagePct": 2
     },
     "cooldown": {
-      "candlesAfterExit": 1,
+      "candlesAfterExit": 3,
       "candleDurationMinutes": 240
     }
   },
