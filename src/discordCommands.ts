@@ -103,33 +103,35 @@ export class DiscordCommands {
     const pos = this.logger.loadState<PositionState>('position');
     if (!pos) return '📊 **Position**\nNo position data yet — bot hasn\'t run a cycle.';
 
-    if (!pos.inPosition) {
-      const cooldown =
-        pos.cooldownUntil && pos.cooldownUntil > Date.now()
-          ? `\nCooldown expires: ${new Date(pos.cooldownUntil).toUTCString()}`
-          : '';
-      return `📊 **Position**\nStatus: ⬜ No active position${cooldown}`;
+    if (!pos.bootstrapDone) {
+      return '📊 **Position**\n⏳ Not bootstrapped — waiting for RSI < 62 to buy initial 50% SOL';
     }
 
-    const tiers: string[] = [];
-    if (pos.tiers.tier1Filled) tiers.push(`T1 @ $${pos.tiers.tier1EntryPrice?.toFixed(4)}`);
-    if (pos.tiers.tier2Filled) tiers.push(`T2 @ $${pos.tiers.tier2EntryPrice?.toFixed(4)}`);
-    if (pos.tiers.tier3Filled) tiers.push(`T3 @ $${pos.tiers.tier3EntryPrice?.toFixed(4)}`);
+    // Derive current SOL% from saved balance snapshot
+    const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number; totalValueUSDC: number; updatedAt: number }>('balances');
+    let allocationLine = '';
+    if (bal && bal.solBalance > 0) {
+      // Derive approximate SOL price from balance snapshot
+      const derivedPrice = (bal.totalValueUSDC - bal.usdcBalance) / bal.solBalance;
+      const managedSolUSDC = pos.solBalance * derivedPrice;
+      const totalManaged = managedSolUSDC + bal.usdcBalance;
+      const currentSolPct = totalManaged > 0 ? (managedSolUSDC / totalManaged) * 100 : 0;
+      allocationLine = `\nAllocation: ${currentSolPct.toFixed(1)}% SOL / ${(100 - currentSolPct).toFixed(1)}% USDC`;
+    }
 
-    const trailingStop =
-      pos.trailingStopActive && pos.trailingStopPrice
-        ? `\nTrailing stop: $${pos.trailingStopPrice.toFixed(4)}`
-        : '';
+    const trailingStop = pos.trailingStopActive && pos.trailingStopPrice
+      ? `\nTrailing stop: $${pos.trailingStopPrice.toFixed(4)} (HWM: $${pos.highWaterMark.toFixed(4)})`
+      : '';
 
-    const partialExit = pos.partialExitDone ? '\nPartial exit: ✅ done' : '';
+    const cooldown = pos.cooldownUntil && pos.cooldownUntil > Date.now()
+      ? `\nCooldown expires: ${new Date(pos.cooldownUntil).toUTCString()}`
+      : '';
 
     return [
       '📊 **Position**',
-      `Status: 🟢 In position`,
+      `Status: 🟢 Active`,
       `SOL held: ${pos.solBalance.toFixed(4)} SOL`,
-      `Avg entry: $${pos.averageEntryPrice.toFixed(4)}`,
-      `Tiers filled: ${tiers.join(', ')}`,
-      `High water mark: $${pos.highWaterMark.toFixed(4)}${trailingStop}${partialExit}`,
+      `Avg entry: $${pos.averageEntryPrice.toFixed(4)}${allocationLine}${trailingStop}${cooldown}`,
     ].join('\n');
   }
 
@@ -139,11 +141,11 @@ export class DiscordCommands {
 
     const lines = trades.map((t) => {
       const emoji = t.side === 'buy' ? '🟢' : '🔴';
-      const tier = t.tier ? ` T${t.tier}` : '';
+      const zone = t.zone ? ` [${t.zone}]` : '';
       const pnl = t.pnl !== null ? ` | P&L: ${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}` : '';
       const dry = t.dryRun ? ' *(dry)*' : '';
       const date = new Date(t.timestamp).toISOString().slice(0, 16).replace('T', ' ');
-      return `${emoji} \`${date}\` **${t.action.toUpperCase()}${tier}**${dry} @ $${t.price.toFixed(4)} · ${t.solAmount.toFixed(3)} SOL${pnl}`;
+      return `${emoji} \`${date}\` **${t.action.toUpperCase()}${zone}**${dry} @ $${t.price.toFixed(4)} · ${t.solAmount.toFixed(3)} SOL${pnl}`;
     });
 
     return `📋 **Last ${trades.length} Trade(s)**\n${lines.join('\n')}`;
@@ -155,11 +157,10 @@ export class DiscordCommands {
 
     const actionEmoji: Record<string, string> = {
       hold: '⏸️',
-      buy_tier1: '🟢',
-      buy_tier2: '🟢',
-      buy_tier3: '🟢',
-      sell_half: '🟡',
-      sell_all: '🔴',
+      bootstrap: '🚀',
+      rebalance_buy: '🟢',
+      rebalance_sell: '🟡',
+      emergency_sell: '🔴',
     };
     const emoji = actionEmoji[sig.action] ?? '❓';
     const executed = sig.executed ? ' ✅ executed' : ' — held';
@@ -190,9 +191,9 @@ export class DiscordCommands {
   private buildHelp(): string {
     return [
       '**SolBot Commands**',
-      '`!solbot status` — online status, network, uptime',
-      '`!solbot position` — current position & tiers',
-      '`!solbot last` — last signal (hold/buy/sell, trend, RSI, reason)',
+      '`!solbot status` — online status, network, uptime, wallet balances',
+      '`!solbot position` — SOL allocation, avg entry, trailing stop',
+      '`!solbot last` — last signal (zone, RSI, VWAP, reason)',
       '`!solbot trades [n]` — last N trades (default 5, max 20)',
       '`!solbot pnl` — total realized P&L',
       '`!solbot help` — this message',

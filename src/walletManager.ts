@@ -1,6 +1,6 @@
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { getAssociatedTokenAddress, getAccount, TokenAccountNotFoundError, TokenInvalidAccountOwnerError } from '@solana/spl-token';
-import { BotConfig, PositionState } from './types';
+import { BotConfig } from './types';
 
 const USDC_MINT_MAINNET = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 const USDC_MINT_DEVNET  = new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
@@ -41,37 +41,59 @@ export class WalletManager {
       const account = await getAccount(this.connection, ata);
       return Number(account.amount) / 10 ** USDC_DECIMALS;
     } catch (err) {
-      // ATA not yet created — normal when wallet has never held this token
       if (err instanceof TokenAccountNotFoundError || err instanceof TokenInvalidAccountOwnerError) {
         return 0;
       }
-      throw err; // re-throw real RPC/network errors
+      throw err;
     }
   }
 
   /**
-   * Calculate how much USDC to allocate per tier based on available USDC
-   * and tier percentages defined in config.
+   * Current SOL % of the bot-managed portfolio.
+   * managedSol = position.solBalance (excludes gas reserve SOL).
+   * usdcBalance = available USDC in wallet.
    */
-  computeTierAllocations(
+  computeCurrentSolPct(managedSolBalance: number, usdcBalance: number, solPrice: number): number {
+    const solValueUSDC = managedSolBalance * solPrice;
+    const total = solValueUSDC + usdcBalance;
+    if (total <= 0) return 0;
+    return (solValueUSDC / total) * 100;
+  }
+
+  /**
+   * How much USDC to spend to reach the target SOL % from the current allocation.
+   * Returns 0 if already at or above target.
+   */
+  computeRebalanceBuyAmount(
+    currentSolPct: number,
+    targetSolPct: number,
+    totalManagedUSDC: number,
     availableUSDC: number,
-    cfg: BotConfig,
-    position: PositionState,
-  ): { tier1: number; tier2: number; tier3: number } {
-    const totalCapital = cfg.capital.startingCapitalUSDC;
-    const t = cfg.strategy.tiers;
+  ): number {
+    if (targetSolPct <= currentSolPct) return 0;
+    const targetSolValue = totalManagedUSDC * (targetSolPct / 100);
+    const currentSolValue = totalManagedUSDC * (currentSolPct / 100);
+    const usdcNeeded = targetSolValue - currentSolValue;
+    return Math.max(0, Math.min(usdcNeeded, availableUSDC));
+  }
 
-    // Allocations are fractions of total starting capital
-    const tier1 = totalCapital * (t.tier1AllocationPct / 100);
-    const tier2 = totalCapital * (t.tier2AllocationPct / 100);
-    const tier3 = totalCapital * (t.tier3AllocationPct / 100);
-
-    // Subtract already-spent amounts
-    const remaining1 = position.tiers.tier1Filled ? 0 : Math.min(tier1, availableUSDC);
-    const remaining2 = position.tiers.tier2Filled ? 0 : Math.min(tier2, availableUSDC);
-    const remaining3 = position.tiers.tier3Filled ? 0 : Math.min(tier3, availableUSDC);
-
-    return { tier1: remaining1, tier2: remaining2, tier3: remaining3 };
+  /**
+   * How much SOL to sell to reach the target SOL % from the current allocation.
+   * Returns 0 if already at or below target.
+   */
+  computeRebalanceSellAmount(
+    currentSolPct: number,
+    targetSolPct: number,
+    totalManagedUSDC: number,
+    solPrice: number,
+    availableSol: number,
+  ): number {
+    if (targetSolPct >= currentSolPct) return 0;
+    const targetSolValue = totalManagedUSDC * (targetSolPct / 100);
+    const currentSolValue = totalManagedUSDC * (currentSolPct / 100);
+    const usdcToRaise = currentSolValue - targetSolValue;
+    const solToSell = solPrice > 0 ? usdcToRaise / solPrice : 0;
+    return Math.max(0, Math.min(solToSell, availableSol));
   }
 
   /**

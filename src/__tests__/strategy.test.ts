@@ -6,37 +6,38 @@ import { BotConfig, PositionState } from '../types';
 function makeCfg(overrides: Partial<BotConfig['strategy']> = {}): BotConfig {
   return {
     strategy: {
-      rsi: {
-        period: 14,
-        tier1BuyThreshold: 30,
-        tier2BuyThreshold: 25,
-        tier3BuyThreshold: 20,
-        sellThreshold: 70,
-        extendedSellThreshold: 80,
-        bearishBuyThreshold: 20,
-        neutralBuyThreshold: 25,
-      },
-      vwap: {
-        tier1DeviationPct: 2,
-        tier2DeviationPct: 4,
-        tier3DeviationPct: 6,
-        sellAtVwap: true,
-        bearishDeviationPct: 5,
-        resetPeriod: 'daily',
-      },
+      rsi: { period: 14 },
+      vwap: { resetPeriod: 'daily' },
       sma: { period: 50, neutralZonePct: 3 },
-      tiers: { tier1AllocationPct: 33, tier2AllocationPct: 33, tier3AllocationPct: 34 },
+      rebalance: {
+        bootstrapRsiThreshold: 62,
+        driftThresholdPct: 7,
+        minTradeUSDC: 3,
+        strongBuyRsi: 28,
+        strongBuyVwapPct: 4,
+        strongBuyTargetSolPct: 75,
+        moderateBuyRsi: 40,
+        moderateBuyVwapPct: 2,
+        moderateBuyTargetSolPct: 62,
+        neutralTargetSolPct: 50,
+        moderateSellRsi: 62,
+        moderateSellVwapFloorPct: 1,
+        moderateSellTargetSolPct: 38,
+        strongSellRsi: 72,
+        strongSellVwapPct: 2,
+        strongSellTargetSolPct: 25,
+      },
       risk: {
-        stopLossPct: 8,
+        stopLossPct: 13,
         trailingStopActivationPct: 10,
-        trailingStopPct: 5,
+        trailingStopPct: 7,
         circuitBreakerDrawdownPct: 30,
         maxSlippagePct: 2,
       },
-      cooldown: { candlesAfterExit: 2, candleDurationMinutes: 240 },
+      cooldown: { candlesAfterExit: 1, candleDurationMinutes: 240 },
       ...overrides,
     },
-    capital: { startingCapitalUSDC: 1000 },
+    capital: { startingCapitalUSDC: 1000, minSolReserveForGas: 0.05 },
     timeframes: { executionTf: '4h', trendTf: '3d' },
     network: { useDevnet: true, rpcEndpoint: '' },
     notifications: { enabled: false, webhookUrl: '', type: 'discord' },
@@ -45,6 +46,16 @@ function makeCfg(overrides: Partial<BotConfig['strategy']> = {}): BotConfig {
 }
 
 const emptyPosition: PositionState = buildInitialPosition();
+
+const bootstrappedPosition: PositionState = {
+  bootstrapDone: true,
+  solBalance: 5,
+  averageEntryPrice: 100,
+  highWaterMark: 100,
+  trailingStopActive: false,
+  trailingStopPrice: null,
+  cooldownUntil: null,
+};
 
 // ── determineTrendBias ────────────────────────────────────────────────────────
 
@@ -69,143 +80,164 @@ describe('determineTrendBias', () => {
   });
 
   it('bullish just above boundary (3.1%)', () => {
-    expect(determineTrendBias(103.1, 100, cfg)).toBe('bullish'); // > 3%
+    expect(determineTrendBias(103.1, 100, cfg)).toBe('bullish');
   });
 
   it('neutral at exact 3% boundary (not strictly greater)', () => {
-    expect(determineTrendBias(103, 100, cfg)).toBe('neutral'); // == 3%, not > 3%
+    expect(determineTrendBias(103, 100, cfg)).toBe('neutral');
   });
 });
 
-// ── Tier buy signals ─────────────────────────────────────────────────────────
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 
-describe('evaluateStrategy — buy signals (bullish)', () => {
+describe('evaluateStrategy — bootstrap phase', () => {
+  const cfg = makeCfg();
+
+  it('holds when RSI is above bootstrapRsiThreshold (62)', () => {
+    const signal = evaluateStrategy(100, 63, 100, 100, emptyPosition, cfg, Date.now(), 0);
+    expect(signal.action).toBe('hold');
+    expect(signal.reason).toMatch(/waiting to bootstrap/i);
+  });
+
+  it('bootstraps when RSI drops below 62', () => {
+    const signal = evaluateStrategy(100, 58, 100, 100, emptyPosition, cfg, Date.now(), 0);
+    expect(signal.action).toBe('bootstrap');
+    expect(signal.targetSolPct).toBe(50);
+  });
+
+  it('holds when RSI is null (no data yet)', () => {
+    const signal = evaluateStrategy(100, null, 100, 100, emptyPosition, cfg, Date.now(), 0);
+    expect(signal.action).toBe('hold');
+    expect(signal.reason).toMatch(/rsi data/i);
+  });
+
+  it('skips zone logic until bootstrapped', () => {
+    // Even with a clear strong_buy signal, should wait to bootstrap
+    const vwap = 100 / (1 - 0.05); // 5% below VWAP
+    const signal = evaluateStrategy(100, 20, vwap, 100, emptyPosition, cfg, Date.now(), 0);
+    // Should bootstrap (RSI < 62) not zone-rebalance
+    expect(signal.action).toBe('bootstrap');
+  });
+});
+
+// ── Zone rebalancing ──────────────────────────────────────────────────────────
+
+describe('evaluateStrategy — zone rebalancing (bootstrapped)', () => {
   const cfg = makeCfg();
   const sma3d = 100;
-  const price = 110; // > SMA → bullish
 
-  it('tier1 buy: RSI < 30 and price 2%+ below VWAP', () => {
-    const vwap = price / (1 - 0.025); // ~2.5% below vwap
-    const signal = evaluateStrategy(price, 28, vwap, sma3d, emptyPosition, cfg, Date.now());
-    expect(signal.action).toBe('buy_tier1');
+  it('hold when within drift threshold (neutral zone, balanced)', () => {
+    // RSI=55 (neutral zone, target 50%), currentSolPct=50% — no drift
+    const signal = evaluateStrategy(100, 55, 100, sma3d, bootstrappedPosition, cfg, Date.now(), 50);
+    expect(signal.action).toBe('hold');
+    expect(signal.zone).toBe('neutral');
   });
 
-  it('tier2 buy: RSI < 25 and price 4%+ below VWAP (tier1 already filled)', () => {
-    const vwap = price / (1 - 0.045); // ~4.5% below vwap
-    const pos: PositionState = {
-      ...emptyPosition,
-      inPosition: true,
-      solBalance: 1,
-      averageEntryPrice: price,
-      tiers: { ...emptyPosition.tiers, tier1Filled: true, tier1Amount: 330, tier1EntryPrice: price },
-    };
-    const signal = evaluateStrategy(price, 23, vwap, sma3d, pos, cfg, Date.now());
-    expect(signal.action).toBe('buy_tier2');
+  it('rebalance_buy when under-allocated in neutral zone', () => {
+    // neutral zone target 50%, currently at 30% (under by 20%)
+    const signal = evaluateStrategy(100, 55, 100, sma3d, bootstrappedPosition, cfg, Date.now(), 30);
+    expect(signal.action).toBe('rebalance_buy');
+    expect(signal.targetSolPct).toBe(50);
   });
 
-  it('tier3 buy: RSI < 20 and price 6%+ below VWAP (tiers 1&2 filled)', () => {
-    const vwap = price / (1 - 0.065);
-    const pos: PositionState = {
-      ...emptyPosition,
-      inPosition: true,
-      solBalance: 2,
-      averageEntryPrice: price,
-      tiers: {
-        ...emptyPosition.tiers,
-        tier1Filled: true,
-        tier2Filled: true,
-        tier1Amount: 330,
-        tier2Amount: 330,
-        tier1EntryPrice: price,
-        tier2EntryPrice: price,
-      },
-    };
-    const signal = evaluateStrategy(price, 18, vwap, sma3d, pos, cfg, Date.now());
-    expect(signal.action).toBe('buy_tier3');
+  it('rebalance_sell when over-allocated in neutral zone', () => {
+    // neutral zone target 50%, currently at 70% (over by 20%)
+    const signal = evaluateStrategy(100, 55, 100, sma3d, bootstrappedPosition, cfg, Date.now(), 70);
+    expect(signal.action).toBe('rebalance_sell');
+    expect(signal.targetSolPct).toBe(50);
   });
 
-  it('hold when RSI meets threshold but VWAP deviation is insufficient', () => {
-    const vwap = price / (1 - 0.01); // only 1% below — not enough for tier1
-    const signal = evaluateStrategy(price, 28, vwap, sma3d, emptyPosition, cfg, Date.now());
+  it('hold when drift is within 7% threshold', () => {
+    // neutral zone target 50%, currently at 55% (only 5% over — below 7% threshold)
+    const signal = evaluateStrategy(100, 55, 100, sma3d, bootstrappedPosition, cfg, Date.now(), 55);
     expect(signal.action).toBe('hold');
   });
 
-  it('hold when tier1 not filled but trying tier2 conditions', () => {
-    const vwap = price / (1 - 0.05);
-    // tier1 NOT filled, but RSI meets tier2 — must fill in order
-    const signal = evaluateStrategy(price, 23, vwap, sma3d, emptyPosition, cfg, Date.now());
-    // Should trigger tier1, not tier2
-    expect(signal.action).toBe('buy_tier1');
+  it('strong_buy zone: RSI < 28 AND price far below VWAP', () => {
+    const vwap = 100 / (1 - 0.045); // ~4.5% below VWAP
+    const signal = evaluateStrategy(100, 25, vwap, sma3d, bootstrappedPosition, cfg, Date.now(), 50);
+    expect(signal.action).toBe('rebalance_buy');
+    expect(signal.zone).toBe('strong_buy');
+    expect(signal.targetSolPct).toBe(75);
+  });
+
+  it('moderate_buy zone: RSI < 40 AND price below VWAP by 2%+', () => {
+    const vwap = 100 / (1 - 0.025); // ~2.5% below VWAP
+    const signal = evaluateStrategy(100, 35, vwap, sma3d, bootstrappedPosition, cfg, Date.now(), 50);
+    expect(signal.action).toBe('rebalance_buy');
+    expect(signal.zone).toBe('moderate_buy');
+    expect(signal.targetSolPct).toBe(62);
+  });
+
+  it('moderate_sell zone: RSI > 62 AND price near or above VWAP', () => {
+    const vwap = 99; // price ~1% above VWAP — passes floor
+    const signal = evaluateStrategy(100, 65, vwap, sma3d, bootstrappedPosition, cfg, Date.now(), 50);
+    expect(signal.action).toBe('rebalance_sell');
+    expect(signal.zone).toBe('moderate_sell');
+    expect(signal.targetSolPct).toBe(38);
+  });
+
+  it('moderate_sell NOT triggered when price too far below VWAP (RSI high but price crashed)', () => {
+    // RSI still 65 (lagging) but price is 2% below VWAP — do not sell
+    const vwap = 100 / (1 - 0.02); // price 2% below VWAP — exceeds floor of -1%
+    const signal = evaluateStrategy(100, 65, vwap, sma3d, bootstrappedPosition, cfg, Date.now(), 50);
+    expect(signal.action).toBe('hold');
+    expect(signal.zone).toBe('neutral');
+  });
+
+  it('strong_sell zone: RSI > 72 AND price 2%+ above VWAP', () => {
+    const vwap = 100 / (1 + 0.025); // price ~2.5% above VWAP
+    const signal = evaluateStrategy(100, 75, vwap, sma3d, bootstrappedPosition, cfg, Date.now(), 50);
+    expect(signal.action).toBe('rebalance_sell');
+    expect(signal.zone).toBe('strong_sell');
+    expect(signal.targetSolPct).toBe(25);
+  });
+
+  it('holds when RSI/VWAP null', () => {
+    const signal = evaluateStrategy(100, null, null, sma3d, bootstrappedPosition, cfg, Date.now(), 50);
+    expect(signal.action).toBe('hold');
+    expect(signal.reason).toMatch(/insufficient/i);
   });
 });
 
-// ── Sell signals ─────────────────────────────────────────────────────────────
+// ── Risk signals ──────────────────────────────────────────────────────────────
 
-describe('evaluateStrategy — sell signals', () => {
+describe('evaluateStrategy — risk / emergency exits', () => {
   const cfg = makeCfg();
   const sma3d = 100;
-  const avgEntry = 150;
 
-  const posInPosition: PositionState = {
-    ...emptyPosition,
-    inPosition: true,
-    solBalance: 5,
-    averageEntryPrice: avgEntry,
-    highWaterMark: avgEntry,
-    tiers: {
-      tier1Filled: true,
-      tier2Filled: true,
-      tier3Filled: true,
-      tier1EntryPrice: avgEntry,
-      tier2EntryPrice: avgEntry,
-      tier3EntryPrice: avgEntry,
-      tier1Amount: 330,
-      tier2Amount: 330,
-      tier3Amount: 340,
-    },
-  };
-
-  it('stop loss: price 8% below average entry', () => {
-    const price = avgEntry * (1 - 0.08); // exactly at stop
-    const signal = evaluateStrategy(price, 45, 155, sma3d, posInPosition, cfg, Date.now());
-    expect(signal.action).toBe('sell_all');
+  it('emergency_sell on stop loss (13% below avg entry)', () => {
+    const avgEntry = 150;
+    const price = avgEntry * (1 - 0.13); // exactly at stop
+    const pos: PositionState = { ...bootstrappedPosition, averageEntryPrice: avgEntry, highWaterMark: avgEntry };
+    const signal = evaluateStrategy(price, 45, 155, sma3d, pos, cfg, Date.now(), 50);
+    expect(signal.action).toBe('emergency_sell');
+    expect(signal.zone).toBe('stop_loss');
+    expect(signal.targetSolPct).toBe(25); // reduce to minimum, not zero
     expect(signal.reason).toMatch(/stop loss/i);
   });
 
-  it('take profit sell_half: RSI > 70 and price >= VWAP', () => {
-    const price = 165;
-    const vwap = 160; // price > vwap ✓
-    const signal = evaluateStrategy(price, 72, vwap, sma3d, posInPosition, cfg, Date.now());
-    expect(signal.action).toBe('sell_half');
-  });
-
-  it('take profit sell_all: RSI > 80', () => {
-    const price = 175;
-    const signal = evaluateStrategy(price, 82, 170, sma3d, posInPosition, cfg, Date.now());
-    expect(signal.action).toBe('sell_all');
-  });
-
-  it('no sell_half if partialExitDone=true', () => {
-    const price = 165;
-    const vwap = 160;
-    const pos = { ...posInPosition, partialExitDone: true };
-    const signal = evaluateStrategy(price, 72, vwap, sma3d, pos, cfg, Date.now());
-    // Should not sell_half again; RSI is not above 80 so holds
-    expect(signal.action).toBe('hold');
-  });
-
-  it('trailing stop triggers when above stop loss level', () => {
-    // avgEntry=150, stopLossPct=8% → stop loss at 138
-    // set price=142 (above stop loss) but below trailing stop price of 145
-    const price = 142;
+  it('emergency_sell on trailing stop', () => {
     const pos: PositionState = {
-      ...posInPosition,
+      ...bootstrappedPosition,
+      averageEntryPrice: 100,
+      highWaterMark: 150,
       trailingStopActive: true,
-      trailingStopPrice: 145,
+      trailingStopPrice: 140,
     };
-    const signal = evaluateStrategy(price, 45, 140, sma3d, pos, cfg, Date.now());
-    expect(signal.action).toBe('sell_all');
+    const price = 138; // below trailing stop
+    const signal = evaluateStrategy(price, 45, 140, sma3d, pos, cfg, Date.now(), 50);
+    expect(signal.action).toBe('emergency_sell');
+    expect(signal.zone).toBe('trailing_stop');
     expect(signal.reason).toMatch(/trailing stop/i);
+  });
+
+  it('no stop loss when price is just above threshold', () => {
+    const avgEntry = 150;
+    const price = avgEntry * (1 - 0.12); // only 12% below — above 13% stop
+    const pos: PositionState = { ...bootstrappedPosition, averageEntryPrice: avgEntry };
+    const signal = evaluateStrategy(price, 55, 135, sma3d, pos, cfg, Date.now(), 50);
+    expect(signal.action).not.toBe('emergency_sell');
   });
 });
 
@@ -214,61 +246,21 @@ describe('evaluateStrategy — sell signals', () => {
 describe('evaluateStrategy — cooldown', () => {
   const cfg = makeCfg();
 
-  it('holds during cooldown', () => {
-    const futureMs = Date.now() + 10 * 60 * 1000; // 10 min in future
-    const pos: PositionState = { ...emptyPosition, cooldownUntil: futureMs };
-    const signal = evaluateStrategy(100, 25, 110, 100, pos, cfg, Date.now());
+  it('holds during cooldown regardless of signals', () => {
+    const futureMs = Date.now() + 10 * 60 * 1000;
+    const pos: PositionState = { ...bootstrappedPosition, cooldownUntil: futureMs };
+    const signal = evaluateStrategy(100, 25, 110, 100, pos, cfg, Date.now(), 50);
     expect(signal.action).toBe('hold');
     expect(signal.reason).toMatch(/cooldown/i);
   });
 
-  it('allows entry after cooldown expires', () => {
-    const pastMs = Date.now() - 60000; // 1 minute ago
-    const pos: PositionState = { ...emptyPosition, cooldownUntil: pastMs };
-    const price = 110;
-    const sma = 100; // price > SMA by 10% → bullish bias
-    const vwap = price / (1 - 0.025); // price 2.5% below VWAP → tier1 eligible
-    const signal = evaluateStrategy(price, 28, vwap, sma, pos, cfg, Date.now());
-    expect(signal.action).toBe('buy_tier1');
-  });
-});
-
-// ── Bearish & neutral bias ────────────────────────────────────────────────────
-
-describe('evaluateStrategy — trend bias filters', () => {
-  const cfg = makeCfg();
-
-  it('bearish bias: blocks entry unless RSI < 20 AND dev < -5%', () => {
-    const price = 90; // below SMA 100 by 10% → bearish
-    const sma = 100;
-    const vwap = 95; // price is -5.26% below vwap — passes
-    // RSI = 22 — too high for bearish threshold
-    const signal = evaluateStrategy(price, 22, vwap, sma, emptyPosition, cfg, Date.now());
-    expect(signal.action).toBe('hold');
-  });
-
-  it('bearish bias: allows entry when RSI < 20 AND dev < -5%', () => {
-    const price = 90;
-    const sma = 100;
-    const vwap = price / (1 - 0.055); // price 5.5% below vwap
-    const signal = evaluateStrategy(price, 18, vwap, sma, emptyPosition, cfg, Date.now());
-    expect(signal.action).toBe('buy_tier1');
-  });
-
-  it('neutral bias: blocks when RSI >= 25', () => {
-    const price = 102; // within ±3% of SMA 100 → neutral
-    const sma = 100;
-    const vwap = price / (1 - 0.025);
-    const signal = evaluateStrategy(price, 27, vwap, sma, emptyPosition, cfg, Date.now());
-    expect(signal.action).toBe('hold');
-  });
-
-  it('neutral bias: allows tier1 when RSI < 25', () => {
-    const price = 102;
-    const sma = 100;
-    const vwap = price / (1 - 0.025);
-    const signal = evaluateStrategy(price, 23, vwap, sma, emptyPosition, cfg, Date.now());
-    expect(signal.action).toBe('buy_tier1');
+  it('resumes normal operation after cooldown expires', () => {
+    const pastMs = Date.now() - 60000;
+    const pos: PositionState = { ...bootstrappedPosition, cooldownUntil: pastMs };
+    // RSI < 40 and price 2.5% below VWAP → moderate_buy
+    const vwap = 100 / (1 - 0.025);
+    const signal = evaluateStrategy(100, 35, vwap, 100, pos, cfg, Date.now(), 30);
+    expect(signal.action).toBe('rebalance_buy');
   });
 });
 
@@ -278,9 +270,7 @@ describe('updateTrailingStop', () => {
   const cfg = makeCfg();
 
   const basePos: PositionState = {
-    ...emptyPosition,
-    inPosition: true,
-    solBalance: 5,
+    ...bootstrappedPosition,
     averageEntryPrice: 100,
     highWaterMark: 100,
   };
@@ -291,26 +281,30 @@ describe('updateTrailingStop', () => {
     expect(updated.trailingStopPrice).toBeNull();
   });
 
-  it('activates trailing stop at 10% profit', () => {
+  it('activates trailing stop at exactly 10% profit', () => {
     const updated = updateTrailingStop(basePos, 110, cfg); // +10%
     expect(updated.trailingStopActive).toBe(true);
-    // stop = 110 * (1 - 0.05) = 104.5
-    expect(updated.trailingStopPrice).toBeCloseTo(104.5, 4);
+    // stop = 110 * (1 - 0.07) = 102.3
+    expect(updated.trailingStopPrice).toBeCloseTo(102.3, 1);
   });
 
-  it('ratchets stop upward as price rises', () => {
-    let pos = updateTrailingStop(basePos, 110, cfg); // activate at 110
-    pos = updateTrailingStop(pos, 120, cfg); // new high
-    // stop = 120 * 0.95 = 114
-    expect(pos.trailingStopPrice).toBeCloseTo(114, 4);
+  it('ratchets stop upward as price makes new highs', () => {
+    let pos = updateTrailingStop(basePos, 110, cfg); // activate
+    pos = updateTrailingStop(pos, 120, cfg);          // new high
+    // stop = 120 * 0.93 = 111.6
+    expect(pos.trailingStopPrice).toBeCloseTo(111.6, 1);
     expect(pos.highWaterMark).toBeCloseTo(120, 4);
   });
 
-  it('does not lower stop when price drops', () => {
-    let pos = updateTrailingStop(basePos, 120, cfg); // activate and set stop at 114
+  it('does not lower stop when price pulls back', () => {
+    let pos = updateTrailingStop(basePos, 120, cfg);
     const stopBefore = pos.trailingStopPrice!;
     pos = updateTrailingStop(pos, 112, cfg); // price drops
-    // Stop should not move below 114
     expect(pos.trailingStopPrice).toBeCloseTo(stopBefore, 4);
+  });
+
+  it('does nothing when not bootstrapped', () => {
+    const pos = updateTrailingStop(emptyPosition, 120, cfg);
+    expect(pos.trailingStopActive).toBe(false);
   });
 });

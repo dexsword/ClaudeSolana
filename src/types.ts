@@ -15,40 +15,26 @@ export interface IndicatorResult {
 
 export type TrendBias = 'bullish' | 'neutral' | 'bearish';
 
-export type Tier = 1 | 2 | 3;
-
-export interface TierState {
-  tier1Filled: boolean;
-  tier2Filled: boolean;
-  tier3Filled: boolean;
-  tier1EntryPrice: number | null;
-  tier2EntryPrice: number | null;
-  tier3EntryPrice: number | null;
-  tier1Amount: number; // USDC spent
-  tier2Amount: number;
-  tier3Amount: number;
-}
-
 export interface PositionState {
-  inPosition: boolean;
-  solBalance: number;        // SOL held by bot
-  averageEntryPrice: number;
-  highWaterMark: number;     // highest price since entry (for trailing stop)
+  bootstrapDone: boolean;          // has the initial 50% SOL buy been executed?
+  solBalance: number;              // SOL held by bot (excludes gas reserve)
+  averageEntryPrice: number;       // weighted avg entry across all rebalance buys
+  highWaterMark: number;           // highest price seen while holding SOL
   trailingStopActive: boolean;
   trailingStopPrice: number | null;
-  tiers: TierState;
-  cooldownUntil: number | null; // Unix ms
-  partialExitDone: boolean; // RSI>70 sell 50% done
+  cooldownUntil: number | null;    // Unix ms — brief pause after emergency_sell
 }
 
 export interface StrategySignal {
-  action: 'buy_tier1' | 'buy_tier2' | 'buy_tier3' | 'sell_half' | 'sell_all' | 'hold';
+  action: 'bootstrap' | 'rebalance_buy' | 'rebalance_sell' | 'emergency_sell' | 'hold';
   reason: string;
   price: number;
   rsi4h: number | null;
   vwap4h: number | null;
   sma3d: number | null;
   trendBias: TrendBias;
+  zone: string;         // which allocation zone we're in (e.g. 'moderate_sell')
+  targetSolPct: number; // desired SOL % of managed portfolio (0-100)
 }
 
 export interface TradeRecord {
@@ -59,7 +45,7 @@ export interface TradeRecord {
   solAmount: number;
   usdcAmount: number;
   price: number;
-  tier: number | null;
+  zone: string | null;      // replaced tier — which zone triggered this trade
   txSignature: string | null;
   dryRun: boolean;
   reason: string;
@@ -83,30 +69,32 @@ export interface BotConfig {
   strategy: {
     rsi: {
       period: number;
-      tier1BuyThreshold: number;
-      tier2BuyThreshold: number;
-      tier3BuyThreshold: number;
-      sellThreshold: number;
-      extendedSellThreshold: number;
-      bearishBuyThreshold: number;
-      neutralBuyThreshold: number;
     };
     vwap: {
-      tier1DeviationPct: number;
-      tier2DeviationPct: number;
-      tier3DeviationPct: number;
-      sellAtVwap: boolean;
-      bearishDeviationPct: number;
       resetPeriod: string;
     };
     sma: {
       period: number;
       neutralZonePct: number;
     };
-    tiers: {
-      tier1AllocationPct: number;
-      tier2AllocationPct: number;
-      tier3AllocationPct: number;
+    rebalance: {
+      bootstrapRsiThreshold: number;   // RSI must be below this to trigger initial 50% buy
+      driftThresholdPct: number;       // min SOL% drift from target before rebalancing
+      minTradeUSDC: number;            // min trade size in USDC to avoid fee drag
+      // Zone thresholds (RSI + VWAP deviation %):
+      strongBuyRsi: number;            // RSI below → strong buy zone
+      strongBuyVwapPct: number;        // price must be this % below VWAP
+      strongBuyTargetSolPct: number;   // target SOL% in strong buy
+      moderateBuyRsi: number;
+      moderateBuyVwapPct: number;
+      moderateBuyTargetSolPct: number;
+      neutralTargetSolPct: number;     // target SOL% in neutral zone (also bootstrap target)
+      moderateSellRsi: number;         // RSI above → moderate sell zone
+      moderateSellVwapFloorPct: number; // price must not be more than this % below VWAP
+      moderateSellTargetSolPct: number;
+      strongSellRsi: number;
+      strongSellVwapPct: number;       // price must be this % above VWAP
+      strongSellTargetSolPct: number;
     };
     risk: {
       stopLossPct: number;
@@ -122,7 +110,7 @@ export interface BotConfig {
   };
   capital: {
     startingCapitalUSDC: number;
-    minSolReserveForGas: number; // SOL — bot halts trading if gas buffer drops below this
+    minSolReserveForGas: number;
   };
   timeframes: {
     executionTf: string;

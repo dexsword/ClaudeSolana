@@ -1,31 +1,32 @@
 {
   "strategy": {
     "rsi": {
-      "period": 14,
-      "tier1BuyThreshold": 35,
-      "tier2BuyThreshold": 31,
-      "tier3BuyThreshold": 23,
-      "sellThreshold": 68,
-      "extendedSellThreshold": 80,
-      "bearishBuyThreshold": 20,
-      "neutralBuyThreshold": 25
+      "period": 14
     },
     "vwap": {
-      "tier1DeviationPct": 2,
-      "tier2DeviationPct": 4,
-      "tier3DeviationPct": 6,
-      "sellAtVwap": true,
-      "bearishDeviationPct": 5,
       "resetPeriod": "daily"
     },
     "sma": {
       "period": 50,
       "neutralZonePct": 3
     },
-    "tiers": {
-      "tier1AllocationPct": 33,
-      "tier2AllocationPct": 33,
-      "tier3AllocationPct": 34
+    "rebalance": {
+      "bootstrapRsiThreshold": 62,
+      "driftThresholdPct": 7,
+      "minTradeUSDC": 3,
+      "strongBuyRsi": 28,
+      "strongBuyVwapPct": 4,
+      "strongBuyTargetSolPct": 75,
+      "moderateBuyRsi": 40,
+      "moderateBuyVwapPct": 2,
+      "moderateBuyTargetSolPct": 62,
+      "neutralTargetSolPct": 50,
+      "moderateSellRsi": 62,
+      "moderateSellVwapFloorPct": 1,
+      "moderateSellTargetSolPct": 38,
+      "strongSellRsi": 72,
+      "strongSellVwapPct": 2,
+      "strongSellTargetSolPct": 25
     },
     "risk": {
       "stopLossPct": 13,
@@ -35,7 +36,7 @@
       "maxSlippagePct": 2
     },
     "cooldown": {
-      "candlesAfterExit": 2,
+      "candlesAfterExit": 1,
       "candleDurationMinutes": 240
     }
   },

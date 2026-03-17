@@ -59,15 +59,22 @@ export class TradeLogger {
       CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
       CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp);
     `);
+
+    // Add zone column to trades if it doesn't exist yet (migration from tier-based schema)
+    try {
+      this.db.exec(`ALTER TABLE trades ADD COLUMN zone TEXT`);
+    } catch {
+      // Column already exists — ignore
+    }
   }
 
   logTrade(record: TradeRecord): number {
     const stmt = this.db.prepare(`
       INSERT INTO trades
-        (timestamp, action, side, sol_amount, usdc_amount, price, tier,
+        (timestamp, action, side, sol_amount, usdc_amount, price, zone,
          tx_signature, dry_run, reason, rsi, vwap, sma, trend_bias, pnl)
       VALUES
-        (@timestamp, @action, @side, @sol_amount, @usdc_amount, @price, @tier,
+        (@timestamp, @action, @side, @sol_amount, @usdc_amount, @price, @zone,
          @tx_signature, @dry_run, @reason, @rsi, @vwap, @sma, @trend_bias, @pnl)
     `);
 
@@ -78,7 +85,7 @@ export class TradeLogger {
       sol_amount: record.solAmount,
       usdc_amount: record.usdcAmount,
       price: record.price,
-      tier: record.tier ?? null,
+      zone: record.zone ?? null,
       tx_signature: record.txSignature ?? null,
       dry_run: record.dryRun ? 1 : 0,
       reason: record.reason,
@@ -146,7 +153,7 @@ export class TradeLogger {
       solAmount: r.sol_amount as number,
       usdcAmount: r.usdc_amount as number,
       price: r.price as number,
-      tier: r.tier as number | null,
+      zone: (r.zone ?? null) as string | null,
       txSignature: r.tx_signature as string | null,
       dryRun: Boolean(r.dry_run),
       reason: r.reason as string,

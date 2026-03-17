@@ -1,7 +1,7 @@
 import { BotConfig, PositionState, StrategySignal, TradeRecord } from './types';
 import { fetchCandles, fetchSpotPrice } from './priceFeed';
 import { getLatestIndicators } from './indicators';
-import { evaluateStrategy, updateTrailingStop, buildInitialPosition } from './strategy';
+import { evaluateStrategy, updateTrailingStop, buildInitialPosition, migratePosition } from './strategy';
 import { TradeExecutor } from './executor';
 import { WalletManager } from './walletManager';
 import { TradeLogger } from './logger';
@@ -32,8 +32,9 @@ export class TradingBot {
     this.notifier = notifier;
     this.dryRun = dryRun;
 
-    // Load persisted position state or start fresh
-    this.position = this.logger.loadState<PositionState>('position') ?? buildInitialPosition();
+    // Load persisted position state, migrating from old tier-based format if needed
+    const rawPosition = this.logger.loadState<Record<string, unknown>>('position');
+    this.position = rawPosition ? migratePosition(rawPosition) : buildInitialPosition();
   }
 
   async tick(): Promise<void> {
@@ -69,11 +70,9 @@ export class TradingBot {
     // ── 3. Update trailing stop ─────────────────────────────────────────────
     this.position = updateTrailingStop(this.position, spotPrice, this.cfg);
 
-    // ── 4. Circuit breaker check ────────────────────────────────────────────
+    // ── 4. Fetch balances & check circuit breaker ───────────────────────────
     const balances = await this.walletManager.getBalances(spotPrice);
 
-    // In dry-run on devnet, substitute the configured starting capital so the
-    // full trade cycle can be exercised without needing real devnet USDC.
     const simulated = this.dryRun && this.cfg.network.useDevnet;
     const availableUSDC = simulated
       ? this.cfg.capital.startingCapitalUSDC
@@ -82,31 +81,36 @@ export class TradingBot {
     console.log(`[Bot] Wallet — SOL: ${balances.solBalance.toFixed(4)} | USDC: ${balances.usdcBalance.toFixed(2)}${simulated ? ` (sim $${availableUSDC})` : ''} | Total: $${balances.totalValueUSDC.toFixed(2)}`);
     this.logger.saveState('balances', { ...balances, updatedAt: now });
 
-    // ── Gas reserve check ────────────────────────────────────────────────────
-    // Gas buffer = total SOL in wallet minus the SOL the bot holds as a position.
-    // Only the gas buffer should cover transaction fees; position SOL gets sold normally.
-    // If gas is low: block new buys (conserve gas) but still allow sells — the sell
-    // methods will cap the amount to leave minSolReserveForGas in the wallet.
+    // Gas reserve check: gas buffer = total wallet SOL minus bot-managed position SOL
     const minGas = this.cfg.capital.minSolReserveForGas;
     const gasBuffer = balances.solBalance - this.position.solBalance;
     const lowGas = !simulated && gasBuffer < minGas;
     if (lowGas) {
-      const msg = `⚠️ Low gas warning! Gas buffer ${gasBuffer.toFixed(4)} SOL is below minimum ${minGas} SOL — new buys paused until topped up`;
+      const msg = `⚠️ Low gas warning! Gas buffer ${gasBuffer.toFixed(4)} SOL < minimum ${minGas} SOL — new buys paused`;
       console.warn(`[Bot] ${msg}`);
       await this.notifier.sendAlert(msg);
     }
 
-    // Circuit breaker compares real portfolio value against startingCapitalUSDC.
-    // Skip it in dry-run devnet mode — the real wallet balance is irrelevant there.
     if (!simulated && this.walletManager.isCircuitBreakerTripped(balances.totalValueUSDC, this.cfg)) {
       this.circuitBreakerTripped = true;
-      const msg = `Circuit breaker triggered! Portfolio value $${balances.totalValueUSDC.toFixed(2)} exceeds ${this.cfg.strategy.risk.circuitBreakerDrawdownPct}% drawdown`;
+      const msg = `Circuit breaker triggered! Portfolio $${balances.totalValueUSDC.toFixed(2)} exceeds ${this.cfg.strategy.risk.circuitBreakerDrawdownPct}% drawdown`;
       console.error(`[Bot] ${msg}`);
       await this.notifier.sendAlert(msg);
       return;
     }
 
-    // ── 5. Evaluate strategy ────────────────────────────────────────────────
+    // ── 5. Compute current allocation ──────────────────────────────────────
+    const managedSolBalance = this.position.bootstrapDone ? this.position.solBalance : 0;
+    const totalManagedUSDC = managedSolBalance * spotPrice + availableUSDC;
+    const currentSolPct = this.walletManager.computeCurrentSolPct(
+      managedSolBalance,
+      availableUSDC,
+      spotPrice,
+    );
+
+    console.log(`[Bot] Allocation — Managed SOL: ${managedSolBalance.toFixed(4)} | SOL%: ${currentSolPct.toFixed(1)}% | Total managed: $${totalManagedUSDC.toFixed(2)} | Bootstrap: ${this.position.bootstrapDone ? '✓' : '✗'}`);
+
+    // ── 6. Evaluate strategy ────────────────────────────────────────────────
     const signal: StrategySignal = evaluateStrategy(
       spotPrice,
       rsi4h,
@@ -115,9 +119,10 @@ export class TradingBot {
       this.position,
       this.cfg,
       now,
+      currentSolPct,
     );
 
-    console.log(`[Bot] Signal: ${signal.action.toUpperCase()} — ${signal.reason}`);
+    console.log(`[Bot] Signal: ${signal.action.toUpperCase()} (${signal.zone}) — ${signal.reason}`);
     this.logger.logSignal({
       timestamp: now,
       action: signal.action,
@@ -132,101 +137,118 @@ export class TradingBot {
 
     await this.notifier.sendSignalNotification(signal);
 
-    // ── 6. Execute signal ───────────────────────────────────────────────────
+    // ── 7. Execute signal ───────────────────────────────────────────────────
     switch (signal.action) {
-      case 'buy_tier1':
-        if (lowGas) { console.warn('[Bot] Skipping buy — gas reserve too low'); break; }
-        await this.executeBuy(1, availableUSDC, signal, spotPrice);
+      case 'bootstrap': {
+        if (lowGas) { console.warn('[Bot] Skipping bootstrap — gas reserve too low'); break; }
+        // Buy neutral target % (50%) of available USDC
+        const usdcToSpend = availableUSDC * (signal.targetSolPct / 100);
+        await this.executeRebalanceBuy(usdcToSpend, signal, spotPrice, true);
         break;
-      case 'buy_tier2':
-        if (lowGas) { console.warn('[Bot] Skipping buy — gas reserve too low'); break; }
-        await this.executeBuy(2, availableUSDC, signal, spotPrice);
+      }
+
+      case 'rebalance_buy': {
+        if (lowGas) { console.warn('[Bot] Skipping rebalance buy — gas reserve too low'); break; }
+        const usdcToSpend = this.walletManager.computeRebalanceBuyAmount(
+          currentSolPct,
+          signal.targetSolPct,
+          totalManagedUSDC,
+          availableUSDC,
+        );
+        if (usdcToSpend < this.cfg.strategy.rebalance.minTradeUSDC) {
+          console.log(`[Bot] Rebalance buy too small ($${usdcToSpend.toFixed(2)}) — skipping`);
+          break;
+        }
+        await this.executeRebalanceBuy(usdcToSpend, signal, spotPrice, false);
         break;
-      case 'buy_tier3':
-        if (lowGas) { console.warn('[Bot] Skipping buy — gas reserve too low'); break; }
-        await this.executeBuy(3, availableUSDC, signal, spotPrice);
+      }
+
+      case 'rebalance_sell': {
+        const solToSell = this.walletManager.computeRebalanceSellAmount(
+          currentSolPct,
+          signal.targetSolPct,
+          totalManagedUSDC,
+          spotPrice,
+          this.position.solBalance,
+        );
+        const minTradeSOL = spotPrice > 0 ? this.cfg.strategy.rebalance.minTradeUSDC / spotPrice : 0;
+        if (solToSell < minTradeSOL) {
+          console.log(`[Bot] Rebalance sell too small (${solToSell.toFixed(4)} SOL) — skipping`);
+          break;
+        }
+        await this.executeRebalanceSell(solToSell, signal, spotPrice, balances.solBalance, false);
         break;
-      case 'sell_half':
-        await this.executeSellHalf(signal, spotPrice, balances.solBalance);
+      }
+
+      case 'emergency_sell': {
+        const solToSell = this.walletManager.computeRebalanceSellAmount(
+          currentSolPct,
+          signal.targetSolPct,
+          totalManagedUSDC,
+          spotPrice,
+          this.position.solBalance,
+        );
+        await this.executeRebalanceSell(solToSell, signal, spotPrice, balances.solBalance, true);
         break;
-      case 'sell_all':
-        await this.executeSellAll(signal, spotPrice, balances.solBalance);
-        break;
+      }
+
       case 'hold':
       default:
         break;
     }
 
-    // ── 7. Persist state ────────────────────────────────────────────────────
+    // ── 8. Persist state ────────────────────────────────────────────────────
     this.logger.saveState('position', this.position);
   }
 
-  private async executeBuy(
-    tier: 1 | 2 | 3,
-    availableUSDC: number,
+  /**
+   * Buy SOL with USDC and update position.
+   * @param isBootstrap  True on the initial 50% buy — sets bootstrapDone = true.
+   */
+  private async executeRebalanceBuy(
+    usdcToSpend: number,
     signal: StrategySignal,
     price: number,
+    isBootstrap: boolean,
   ): Promise<void> {
-    const allocs = this.walletManager.computeTierAllocations(availableUSDC, this.cfg, this.position);
-    const usdcToSpend = tier === 1 ? allocs.tier1 : tier === 2 ? allocs.tier2 : allocs.tier3;
-
     if (usdcToSpend <= 0) {
-      console.warn(`[Bot] Tier ${tier} — no USDC available to spend`);
+      console.warn('[Bot] Rebalance buy — no USDC to spend');
       return;
     }
 
-    console.log(`[Bot] Buying SOL with $${usdcToSpend.toFixed(2)} USDC (Tier ${tier})${this.dryRun ? ' [DRY RUN]' : ''}`);
-    const result = await this.executor.buySol(usdcToSpend, this.dryRun, price);
+    const label = isBootstrap ? 'Bootstrap' : `Rebalance buy [${signal.zone}]`;
+    console.log(`[Bot] ${label} — spending $${usdcToSpend.toFixed(2)} USDC (target ${signal.targetSolPct}% SOL)${this.dryRun ? ' [DRY RUN]' : ''}`);
 
+    const result = await this.executor.buySol(usdcToSpend, this.dryRun, price);
     if (!result.success) {
       console.error(`[Bot] Buy failed: ${result.error}`);
       return;
     }
 
-    // Update position state — use actual execution price from swap, not the
-    // pre-slippage market price, so avg entry and stop-loss are accurate.
     const execPrice = result.price;
     const prevSol = this.position.solBalance;
     const newSol = prevSol + result.outputAmount;
-    const prevAvg = this.position.averageEntryPrice;
-    const newAvg =
-      prevSol === 0
-        ? execPrice
-        : (prevAvg * prevSol + execPrice * result.outputAmount) / newSol;
-
-    const tiers = { ...this.position.tiers };
-    if (tier === 1) {
-      tiers.tier1Filled = true;
-      tiers.tier1EntryPrice = execPrice;
-      tiers.tier1Amount = usdcToSpend;
-    } else if (tier === 2) {
-      tiers.tier2Filled = true;
-      tiers.tier2EntryPrice = execPrice;
-      tiers.tier2Amount = usdcToSpend;
-    } else {
-      tiers.tier3Filled = true;
-      tiers.tier3EntryPrice = execPrice;
-      tiers.tier3Amount = usdcToSpend;
-    }
+    const newAvg = prevSol === 0
+      ? execPrice
+      : (prevSol * this.position.averageEntryPrice + result.outputAmount * execPrice) / newSol;
 
     this.position = {
       ...this.position,
-      inPosition: true,
+      bootstrapDone: true,
       solBalance: newSol,
       averageEntryPrice: newAvg,
       highWaterMark: Math.max(this.position.highWaterMark, price),
-      tiers,
     };
     this.logger.saveState('position', this.position);
 
     const trade: TradeRecord = {
       timestamp: Date.now(),
-      action: `buy_tier${tier}`,
+      action: isBootstrap ? 'bootstrap' : 'rebalance_buy',
       side: 'buy',
       solAmount: result.outputAmount,
       usdcAmount: usdcToSpend,
       price,
-      tier,
+      zone: signal.zone,
       txSignature: result.txSignature,
       dryRun: this.dryRun,
       reason: signal.reason,
@@ -241,107 +263,79 @@ export class TradingBot {
     await this.notifier.sendTradeNotification(trade, this.dryRun);
   }
 
-  private async executeSellHalf(signal: StrategySignal, price: number, walletSolBalance?: number): Promise<void> {
-    let halfSol = this.position.solBalance / 2;
-    if (halfSol <= 0) return;
-
-    // Cap sell to leave gas reserve in wallet
-    if (!this.dryRun && walletSolBalance !== undefined) {
-      const minGas = this.cfg.capital.minSolReserveForGas;
-      const maxSellable = Math.max(0, walletSolBalance - minGas);
-      if (halfSol > maxSellable) {
-        console.warn(`[Bot] Sell-half capped from ${halfSol.toFixed(4)} to ${maxSellable.toFixed(4)} SOL to preserve gas reserve`);
-        halfSol = maxSellable;
-      }
-    }
-    if (halfSol <= 0) {
-      console.warn('[Bot] Sell-half skipped — no SOL available above gas reserve');
+  /**
+   * Sell SOL to USDC and update position.
+   * @param isEmergency  True for stop loss / trailing stop — sets a brief cooldown
+   *                     and resets the trailing stop state.
+   */
+  private async executeRebalanceSell(
+    solToSell: number,
+    signal: StrategySignal,
+    price: number,
+    walletSolBalance: number,
+    isEmergency: boolean,
+  ): Promise<void> {
+    if (solToSell <= 0) {
+      console.warn('[Bot] Rebalance sell — no SOL to sell');
       return;
     }
 
-    console.log(`[Bot] Selling 50% of SOL position (${halfSol.toFixed(4)} SOL)${this.dryRun ? ' [DRY RUN]' : ''}`);
-    const result = await this.executor.sellSol(halfSol, this.dryRun, price);
-
-    if (!result.success) {
-      console.error(`[Bot] Sell-half failed: ${result.error}`);
-      return;
-    }
-
-    const pnl = this.calculatePnl(halfSol, result.outputAmount);
-    this.position = {
-      ...this.position,
-      solBalance: this.position.solBalance - halfSol,
-      partialExitDone: true,
-    };
-    this.logger.saveState('position', this.position);
-
-    const trade: TradeRecord = {
-      timestamp: Date.now(),
-      action: 'sell_half',
-      side: 'sell',
-      solAmount: halfSol,
-      usdcAmount: result.outputAmount,
-      price,
-      tier: null,
-      txSignature: result.txSignature,
-      dryRun: this.dryRun,
-      reason: signal.reason,
-      rsi: signal.rsi4h,
-      vwap: signal.vwap4h,
-      sma: signal.sma3d,
-      trendBias: signal.trendBias,
-      pnl,
-    };
-
-    this.logger.logTrade(trade);
-    await this.notifier.sendTradeNotification(trade, this.dryRun);
-  }
-
-  private async executeSellAll(signal: StrategySignal, price: number, walletSolBalance?: number): Promise<void> {
-    let solToSell = this.position.solBalance;
-    if (solToSell <= 0) return;
-
     // Cap sell to leave gas reserve in wallet
-    if (!this.dryRun && walletSolBalance !== undefined) {
+    if (!this.dryRun) {
       const minGas = this.cfg.capital.minSolReserveForGas;
       const maxSellable = Math.max(0, walletSolBalance - minGas);
       if (solToSell > maxSellable) {
-        console.warn(`[Bot] Sell-all capped from ${solToSell.toFixed(4)} to ${maxSellable.toFixed(4)} SOL to preserve gas reserve`);
+        console.warn(`[Bot] Sell capped from ${solToSell.toFixed(4)} to ${maxSellable.toFixed(4)} SOL (gas reserve protection)`);
         solToSell = maxSellable;
       }
     }
     if (solToSell <= 0) {
-      console.warn('[Bot] Sell-all skipped — no SOL available above gas reserve');
+      console.warn('[Bot] Sell skipped — no SOL above gas reserve');
       return;
     }
 
-    console.log(`[Bot] Selling entire SOL position (${solToSell.toFixed(4)} SOL)${this.dryRun ? ' [DRY RUN]' : ''}`);
-    const result = await this.executor.sellSol(solToSell, this.dryRun, price);
+    const label = isEmergency ? `Emergency sell [${signal.zone}]` : `Rebalance sell [${signal.zone}]`;
+    console.log(`[Bot] ${label} — selling ${solToSell.toFixed(4)} SOL (target ${signal.targetSolPct}% SOL)${this.dryRun ? ' [DRY RUN]' : ''}`);
 
+    const result = await this.executor.sellSol(solToSell, this.dryRun, price);
     if (!result.success) {
-      console.error(`[Bot] Sell-all failed: ${result.error}`);
+      console.error(`[Bot] Sell failed: ${result.error}`);
       return;
     }
 
     const pnl = this.calculatePnl(solToSell, result.outputAmount);
+    const newSolBalance = Math.max(0, this.position.solBalance - solToSell);
 
-    // Apply cooldown
-    const cooldownMs = this.cfg.strategy.cooldown.candlesAfterExit *
-      this.cfg.strategy.cooldown.candleDurationMinutes * 60 * 1000;
-    const cooldownUntil = Date.now() + cooldownMs;
+    let updatedPosition: PositionState = {
+      ...this.position,
+      solBalance: newSolBalance,
+    };
 
-    // Reset position
-    this.position = { ...buildInitialPosition(), cooldownUntil };
+    if (isEmergency) {
+      // Reset trailing stop and set brief cooldown so we don't immediately re-enter
+      const cooldownMs = this.cfg.strategy.cooldown.candlesAfterExit
+        * this.cfg.strategy.cooldown.candleDurationMinutes * 60 * 1000;
+      updatedPosition = {
+        ...updatedPosition,
+        trailingStopActive: false,
+        trailingStopPrice: null,
+        highWaterMark: price,         // reset HWM to current price for fresh tracking
+        cooldownUntil: Date.now() + cooldownMs,
+      };
+      console.log(`[Bot] Emergency exit — cooldown until ${new Date(Date.now() + cooldownMs).toISOString()}`);
+    }
+
+    this.position = updatedPosition;
     this.logger.saveState('position', this.position);
 
     const trade: TradeRecord = {
       timestamp: Date.now(),
-      action: 'sell_all',
+      action: isEmergency ? signal.zone : 'rebalance_sell',
       side: 'sell',
       solAmount: solToSell,
       usdcAmount: result.outputAmount,
       price,
-      tier: null,
+      zone: signal.zone,
       txSignature: result.txSignature,
       dryRun: this.dryRun,
       reason: signal.reason,
@@ -354,10 +348,10 @@ export class TradingBot {
 
     this.logger.logTrade(trade);
     await this.notifier.sendTradeNotification(trade, this.dryRun);
-    console.log(`[Bot] Cooldown until ${new Date(cooldownUntil).toISOString()}`);
   }
 
   private calculatePnl(solAmount: number, usdcReceived: number): number {
+    if (this.position.averageEntryPrice <= 0) return 0;
     const costBasis = solAmount * this.position.averageEntryPrice;
     return usdcReceived - costBasis;
   }
@@ -368,9 +362,8 @@ export class TradingBot {
   }
 
   /**
-   * Force a full buy_tier1 → sell_all cycle using live quotes.
-   * Only callable when dryRun=true. Used to smoke-test the trade path
-   * without waiting for real strategy signals.
+   * Force a bootstrap → sell cycle using live quotes.
+   * Only callable when dryRun=true.
    */
   async runTestCycle(): Promise<void> {
     if (!this.dryRun) {
@@ -401,30 +394,40 @@ export class TradingBot {
       : (await this.walletManager.getBalances(spotPrice)).usdcBalance;
 
     const buySignal: StrategySignal = {
-      action: 'buy_tier1',
-      reason: 'test-cycle forced buy',
+      action: 'bootstrap',
+      reason: 'test-cycle forced bootstrap buy',
       price: spotPrice,
       rsi4h,
       vwap4h,
       sma3d,
       trendBias: 'neutral',
+      zone: 'test',
+      targetSolPct: 50,
     };
 
-    console.log('[Bot] Step 1/2 — forcing buy_tier1...');
-    await this.executeBuy(1, availableUSDC, buySignal, spotPrice);
+    console.log('[Bot] Step 1/2 — forcing bootstrap buy (50% of USDC)...');
+    await this.executeRebalanceBuy(availableUSDC * 0.5, buySignal, spotPrice, true);
 
     const sellSignal: StrategySignal = {
-      action: 'sell_all',
+      action: 'rebalance_sell',
       reason: 'test-cycle forced sell',
       price: spotPrice,
       rsi4h,
       vwap4h,
       sma3d,
       trendBias: 'neutral',
+      zone: 'test',
+      targetSolPct: 0,
     };
 
-    console.log('[Bot] Step 2/2 — forcing sell_all...');
-    await this.executeSellAll(sellSignal, spotPrice);
+    console.log('[Bot] Step 2/2 — forcing full rebalance sell...');
+    await this.executeRebalanceSell(
+      this.position.solBalance,
+      sellSignal,
+      spotPrice,
+      this.position.solBalance + this.cfg.capital.minSolReserveForGas,
+      false,
+    );
 
     console.log('[Bot] ══ TEST CYCLE COMPLETE ══\n');
   }

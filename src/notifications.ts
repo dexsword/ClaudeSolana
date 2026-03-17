@@ -21,11 +21,11 @@ export class Notifier {
 
     const emoji = trade.side === 'buy' ? '🟢' : '🔴';
     const mode = dryRun ? '[DRY RUN] ' : '';
-    const tier = trade.tier ? ` (Tier ${trade.tier})` : '';
+    const zone = trade.zone ? ` [${trade.zone}]` : '';
     const pnl = trade.pnl !== null ? `\nP&L: ${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}` : '';
 
     const message = [
-      `${emoji} ${mode}**${trade.action.toUpperCase()}${tier}**`,
+      `${emoji} ${mode}**${trade.action.toUpperCase()}${zone}**`,
       `Price: $${trade.price.toFixed(4)}`,
       `SOL: ${trade.solAmount.toFixed(4)} | USDC: $${trade.usdcAmount.toFixed(2)}`,
       `RSI: ${trade.rsi?.toFixed(1) ?? 'N/A'} | VWAP: $${trade.vwap?.toFixed(4) ?? 'N/A'}`,
