@@ -98,11 +98,15 @@ export class WalletManager {
 
   /**
    * Check if circuit breaker should fire: portfolio value has dropped
-   * more than circuitBreakerDrawdownPct% from starting capital.
+   * more than circuitBreakerDrawdownPct% from its all-time high-water mark.
+   *
+   * Using a live HWM rather than a static starting capital means the bot
+   * automatically recalibrates when funds are added or profits compound —
+   * no manual config changes required.
    */
-  isCircuitBreakerTripped(totalValueUSDC: number, cfg: BotConfig): boolean {
-    const startingCapital = cfg.capital.startingCapitalUSDC;
-    const drawdown = ((startingCapital - totalValueUSDC) / startingCapital) * 100;
+  isCircuitBreakerTripped(totalValueUSDC: number, portfolioHWM: number, cfg: BotConfig): boolean {
+    if (portfolioHWM <= 0) return false; // no baseline established yet
+    const drawdown = ((portfolioHWM - totalValueUSDC) / portfolioHWM) * 100;
     return drawdown >= cfg.strategy.risk.circuitBreakerDrawdownPct;
   }
 }

@@ -15,6 +15,7 @@ export class TradingBot {
   private notifier: Notifier;
   private dryRun: boolean;
   private position: PositionState;
+  private portfolioHWM: number = 0;  // all-time high portfolio value — drives circuit breaker
   private circuitBreakerTripped: boolean = false;
 
   constructor(
@@ -35,6 +36,11 @@ export class TradingBot {
     // Load persisted position, migrating from any previous format automatically
     const rawPosition = this.logger.loadState<Record<string, unknown>>('position');
     this.position = rawPosition ? migratePosition(rawPosition) : buildInitialPosition();
+
+    // Load portfolio high-water mark — falls back to configured starting capital
+    // so the circuit breaker is calibrated correctly from day one
+    this.portfolioHWM = this.logger.loadState<number>('portfolioHWM')
+      ?? this.cfg.capital.startingCapitalUSDC;
   }
 
   async tick(): Promise<void> {
@@ -78,7 +84,15 @@ export class TradingBot {
       ? this.cfg.capital.startingCapitalUSDC
       : balances.usdcBalance;
 
-    console.log(`[Bot] Wallet — SOL: ${balances.solBalance.toFixed(4)} | USDC: ${balances.usdcBalance.toFixed(2)}${simulated ? ` (sim $${availableUSDC})` : ''} | Total: $${balances.totalValueUSDC.toFixed(2)}`);
+    // Update portfolio high-water mark — persists across restarts so the circuit
+    // breaker always measures drawdown from the true peak, not a static config value.
+    // Adding funds naturally raises the HWM on the next tick, recalibrating CB automatically.
+    if (!simulated && balances.totalValueUSDC > this.portfolioHWM) {
+      this.portfolioHWM = balances.totalValueUSDC;
+      this.logger.saveState('portfolioHWM', this.portfolioHWM);
+    }
+
+    console.log(`[Bot] Wallet — SOL: ${balances.solBalance.toFixed(4)} | USDC: ${balances.usdcBalance.toFixed(2)}${simulated ? ` (sim $${availableUSDC})` : ''} | Total: $${balances.totalValueUSDC.toFixed(2)} | Peak: $${this.portfolioHWM.toFixed(2)}`);
     this.logger.saveState('balances', { ...balances, updatedAt: now });
 
     // ── 5. Position reconciliation ─────────────────────────────────────────
@@ -110,7 +124,7 @@ export class TradingBot {
       await this.notifier.sendAlert(msg);
     }
 
-    if (!simulated && this.walletManager.isCircuitBreakerTripped(balances.totalValueUSDC, this.cfg)) {
+    if (!simulated && this.walletManager.isCircuitBreakerTripped(balances.totalValueUSDC, this.portfolioHWM, this.cfg)) {
       this.circuitBreakerTripped = true;
       const msg = `Circuit breaker triggered! Portfolio $${balances.totalValueUSDC.toFixed(2)} exceeds ${this.cfg.strategy.risk.circuitBreakerDrawdownPct}% drawdown`;
       console.error(`[Bot] ${msg}`);
