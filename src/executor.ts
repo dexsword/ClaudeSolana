@@ -7,7 +7,7 @@ const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const SOL_DECIMALS = 9;
 const USDC_DECIMALS = 6;
-const JUPITER_BASE = process.env.JUPITER_API_URL ?? 'https://quote-api.jup.ag/v6';
+const JUPITER_BASE = process.env.JUPITER_API_URL ?? 'https://api.jup.ag/swap/v1';
 
 export class TradeExecutor {
   private connection: Connection;
@@ -82,6 +82,7 @@ export class TradeExecutor {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async getQuote(inputMint: string, outputMint: string, amount: number): Promise<any> {
+    const apiKey = process.env.JUPITER_PRICE_API_KEY ?? '';
     const resp = await axios.get(`${JUPITER_BASE}/quote`, {
       params: {
         inputMint,
@@ -90,6 +91,7 @@ export class TradeExecutor {
         slippageBps: this.maxSlippageBps,
         onlyDirectRoutes: false,
       },
+      headers: { 'x-api-key': apiKey },
       timeout: 10000,
     });
     return resp.data;
@@ -98,6 +100,7 @@ export class TradeExecutor {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async executeSwap(quote: any): Promise<string> {
     // Step 1: Get swap transaction from Jupiter
+    const apiKey = process.env.JUPITER_PRICE_API_KEY ?? '';
     const swapResp = await axios.post(
       `${JUPITER_BASE}/swap`,
       {
@@ -107,7 +110,7 @@ export class TradeExecutor {
         dynamicComputeUnitLimit: true,
         prioritizationFeeLamports: 'auto',
       },
-      { timeout: 15000 },
+      { headers: { 'x-api-key': apiKey }, timeout: 15000 },
     );
 
     const { swapTransaction } = swapResp.data;

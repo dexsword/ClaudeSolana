@@ -294,6 +294,7 @@ export class TradingBot {
     const result = await this.executor.buySol(usdcToSpend, this.dryRun, price);
     if (!result.success) {
       console.error(`[Bot] Buy failed: ${result.error}`);
+      await this.notifier.sendAlert(`Buy failed: ${result.error}`);
       return;
     }
 
@@ -372,6 +373,7 @@ export class TradingBot {
     const result = await this.executor.sellSol(solToSell, this.dryRun, price);
     if (!result.success) {
       console.error(`[Bot] Sell failed: ${result.error}`);
+      await this.notifier.sendAlert(`Sell failed: ${result.error}`);
       return;
     }
 
