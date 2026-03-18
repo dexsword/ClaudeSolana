@@ -17,6 +17,8 @@ export class TradingBot {
   private position: PositionState;
   private portfolioHWM: number = 0;  // all-time high portfolio value — drives circuit breaker
   private circuitBreakerTripped: boolean = false;
+  private lastBootstrapAttemptMs: number = 0;
+  private static readonly BOOTSTRAP_RETRY_COOLDOWN_MS = 5 * 60 * 1000; // 5 min between retries
 
   constructor(
     cfg: BotConfig,
@@ -214,6 +216,14 @@ export class TradingBot {
     switch (effectiveAction) {
       case 'bootstrap': {
         if (lowGas) { console.warn('[Bot] Skipping bootstrap — gas reserve too low'); break; }
+        const now = Date.now();
+        const msSinceLast = now - this.lastBootstrapAttemptMs;
+        if (this.lastBootstrapAttemptMs > 0 && msSinceLast < TradingBot.BOOTSTRAP_RETRY_COOLDOWN_MS) {
+          const waitSec = Math.ceil((TradingBot.BOOTSTRAP_RETRY_COOLDOWN_MS - msSinceLast) / 1000);
+          console.warn(`[Bot] Bootstrap cooldown — retrying in ${waitSec}s`);
+          break;
+        }
+        this.lastBootstrapAttemptMs = now;
         const usdcToSpend = availableUSDC * (signal.targetSolPct / 100);
         await this.executeRebalanceBuy(usdcToSpend, signal, spotPrice, true);
         break;
