@@ -85,9 +85,19 @@ export class DiscordCommands {
     const mode = this.cfg.dryRun ? ' [DRY RUN]' : '';
 
     const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number; totalValueUSDC: number; updatedAt: number }>('balances');
+    const pos = this.logger.loadState<PositionState>('position');
     const hwm = this.logger.loadState<number>('portfolioHWM');
+
+    // Use position.solBalance (updated after every trade) rather than bal.solBalance
+    // (only updated at tick start, so stale immediately post-trade).
+    const solBalance = pos?.bootstrapDone ? pos.solBalance : (bal?.solBalance ?? 0);
+    const usdcBalance = bal?.usdcBalance ?? 0;
+    // Re-derive total using the live SOL figure + cached USDC + implied SOL price
+    const impliedSolPrice = bal && bal.solBalance > 0 ? (bal.totalValueUSDC - bal.usdcBalance) / bal.solBalance : 0;
+    const totalValueUSDC = bal ? solBalance * impliedSolPrice + usdcBalance : 0;
+
     const balLine = bal
-      ? `SOL: ${bal.solBalance.toFixed(4)} | USDC: $${bal.usdcBalance.toFixed(2)} | Total: $${bal.totalValueUSDC.toFixed(2)}`
+      ? `SOL: ${solBalance.toFixed(4)} | USDC: $${usdcBalance.toFixed(2)} | Total: ~$${totalValueUSDC.toFixed(2)}`
       : 'Balance: not yet fetched';
     const hwmLine = hwm ? ` | Peak: $${hwm.toFixed(2)}` : '';
     const balAge = bal ? ` *(as of ${new Date(bal.updatedAt).toISOString().slice(11, 16)} UTC)*` : '';
