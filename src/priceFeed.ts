@@ -5,6 +5,26 @@ const BIRDEYE_BASE = 'https://public-api.birdeye.so';
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
+// Rate limiter: enforces a minimum gap between consecutive Birdeye API calls.
+// The free tier returns 429 when two calls land simultaneously — this ensures
+// they are always spaced at least BIRDEYE_MIN_INTERVAL_MS apart.
+const BIRDEYE_MIN_INTERVAL_MS = 2000;
+let lastBirdeyeCallMs = 0;
+let birdeyeQueue: Promise<void> = Promise.resolve();
+
+function birdeyeRateLimited<T>(fn: () => Promise<T>): Promise<T> {
+  const result = birdeyeQueue.then(async () => {
+    const now = Date.now();
+    const wait = BIRDEYE_MIN_INTERVAL_MS - (now - lastBirdeyeCallMs);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    lastBirdeyeCallMs = Date.now();
+    return fn();
+  });
+  // Chain the queue so future calls wait for this one to start
+  birdeyeQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 const TF_TO_SECONDS: Record<string, number> = {
   '1m': 60,
   '5m': 300,
@@ -31,7 +51,7 @@ export async function fetchCandles(
   const from = now - intervalSeconds * limit;
 
   try {
-    return await fetchBirdeyeCandles(timeframe, from, now, apiKey);
+    return await birdeyeRateLimited(() => fetchBirdeyeCandles(timeframe, from, now, apiKey));
   } catch (err) {
     console.warn(`[PriceFeed] Birdeye failed (${(err as Error).message}), trying Helius fallback`);
     return await fetchHeliusCandles(timeframe, limit, intervalSeconds, now);
