@@ -8,7 +8,7 @@ function makeCfg(overrides: Partial<BotConfig['strategy']> = {}): BotConfig {
     strategy: {
       rsi: { period: 14 },
       vwap: { resetPeriod: 'daily' },
-      sma: { period: 50, neutralZonePct: 3 },
+      sma: { period: 50, neutralZonePct: 3, trendHysteresisPct: 1.5 },
       rebalance: {
         bootstrapRsiThreshold: 62,
         driftThresholdPct: 7,
@@ -73,6 +73,7 @@ const bootstrapped: PositionState = {
   pendingZone: null,
   pendingZoneCount: 0,
   requireOversoldRecovery: false,
+  lastTrendBias: 'neutral',
 };
 
 // ── determineTrendBias ────────────────────────────────────────────────────────
@@ -103,6 +104,39 @@ describe('determineTrendBias', () => {
 
   it('neutral at exact 3% boundary', () => {
     expect(determineTrendBias(103, 100, cfg)).toBe('neutral');
+  });
+
+  describe('hysteresis', () => {
+    // neutralZonePct=3, trendHysteresisPct=1.5 → inner release threshold = 1.5%
+    it('stays bearish when price recovers into hysteresis band (between -1.5% and -3%)', () => {
+      expect(determineTrendBias(97, 100, cfg, 'bearish')).toBe('bearish'); // -3% exact: still bearish
+      expect(determineTrendBias(97.5, 100, cfg, 'bearish')).toBe('bearish'); // -2.5%: in band
+      expect(determineTrendBias(98.4, 100, cfg, 'bearish')).toBe('bearish'); // -1.6%: in band
+    });
+
+    it('exits bearish once price recovers past inner threshold (-1.5%)', () => {
+      expect(determineTrendBias(98.6, 100, cfg, 'bearish')).toBe('neutral'); // -1.4%: past release
+      expect(determineTrendBias(100, 100, cfg, 'bearish')).toBe('neutral');  // at SMA
+    });
+
+    it('stays bullish when price falls into hysteresis band (between +1.5% and +3%)', () => {
+      expect(determineTrendBias(103, 100, cfg, 'bullish')).toBe('bullish');  // +3% exact: still bullish
+      expect(determineTrendBias(102, 100, cfg, 'bullish')).toBe('bullish');  // +2%: in band
+      expect(determineTrendBias(101.6, 100, cfg, 'bullish')).toBe('bullish'); // +1.6%: in band
+    });
+
+    it('exits bullish once price falls past inner threshold (+1.5%)', () => {
+      expect(determineTrendBias(101.4, 100, cfg, 'bullish')).toBe('neutral'); // +1.4%: past release
+      expect(determineTrendBias(100, 100, cfg, 'bullish')).toBe('neutral');   // at SMA
+    });
+
+    it('enters bearish from neutral when price crosses outer threshold', () => {
+      expect(determineTrendBias(96.9, 100, cfg, 'neutral')).toBe('bearish'); // -3.1%: crossed
+    });
+
+    it('does not enter bearish from neutral within the outer threshold', () => {
+      expect(determineTrendBias(97.5, 100, cfg, 'neutral')).toBe('neutral'); // -2.5%: not crossed
+    });
   });
 });
 

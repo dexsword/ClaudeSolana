@@ -8,7 +8,8 @@
     },
     "sma": {
       "period": 50,
-      "neutralZonePct": 3
+      "neutralZonePct": 3,
+      "trendHysteresisPct": 1.5
     },
     "rebalance": {
       "bootstrapRsiThreshold": 62,

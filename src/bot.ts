@@ -197,6 +197,9 @@ export class TradingBot {
       }
     }
 
+    // Persist the resolved trend bias so next tick uses it for hysteresis
+    this.position = { ...this.position, lastTrendBias: signal.trendBias };
+
     console.log(`[Bot] Signal: ${signal.action.toUpperCase()} (${signal.zone}) → effective: ${effectiveAction.toUpperCase()} — ${signal.reason}`);
     this.logger.logSignal({
       timestamp: now,

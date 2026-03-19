@@ -32,6 +32,9 @@ export interface PositionState {
 
   // After an emergency exit, require RSI to reach oversold before rebuilding
   requireOversoldRecovery: boolean;
+
+  // Trend bias hysteresis: last confirmed trend so we don't flip on boundary noise
+  lastTrendBias: TrendBias;
 }
 
 export interface StrategySignal {
@@ -86,6 +89,7 @@ export interface BotConfig {
     sma: {
       period: number;
       neutralZonePct: number;
+      trendHysteresisPct: number;  // how far price must recover before bias changes (< neutralZonePct)
     };
     rebalance: {
       bootstrapRsiThreshold: number;

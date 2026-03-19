@@ -4,14 +4,33 @@ export function determineTrendBias(
   price: number,
   sma3d: number | null,
   cfg: BotConfig,
+  previousBias: TrendBias = 'neutral',
 ): TrendBias {
   if (sma3d === null) return 'neutral';
 
-  const neutralZone = cfg.strategy.sma.neutralZonePct / 100;
+  const outerZone = cfg.strategy.sma.neutralZonePct / 100;
+  const hysteresis = (cfg.strategy.sma.trendHysteresisPct ?? 0) / 100;
+  // Inner threshold: how far price must recover before the bias releases back to neutral.
+  // Must be strictly less than outerZone so the hysteresis band has width.
+  const innerZone = Math.max(0, outerZone - hysteresis);
+
   const pctFromSma = (price - sma3d) / sma3d;
 
-  if (pctFromSma > neutralZone) return 'bullish';
-  if (pctFromSma < -neutralZone) return 'bearish';
+  if (previousBias === 'bearish') {
+    // Stay bearish until price recovers past the inner (release) threshold
+    if (pctFromSma > -innerZone) return 'neutral';
+    return 'bearish';
+  }
+
+  if (previousBias === 'bullish') {
+    // Stay bullish until price falls past the inner (release) threshold
+    if (pctFromSma < innerZone) return 'neutral';
+    return 'bullish';
+  }
+
+  // Was neutral: use outer thresholds to enter a bias
+  if (pctFromSma > outerZone) return 'bullish';
+  if (pctFromSma < -outerZone) return 'bearish';
   return 'neutral';
 }
 
@@ -84,7 +103,7 @@ export function evaluateStrategy(
   currentSolPct: number,
   rsiDirection: RsiDirection,
 ): StrategySignal {
-  const trendBias = determineTrendBias(price, sma3d, cfg);
+  const trendBias = determineTrendBias(price, sma3d, cfg, position.lastTrendBias ?? 'neutral');
   const base: Omit<StrategySignal, 'action' | 'reason' | 'zone' | 'targetSolPct'> = {
     price, rsi4h, vwap4h, sma3d, trendBias, rsiDirection,
   };
@@ -264,6 +283,7 @@ export function buildInitialPosition(): PositionState {
     pendingZone: null,
     pendingZoneCount: 0,
     requireOversoldRecovery: false,
+    lastTrendBias: 'neutral',
   };
 }
 
@@ -287,6 +307,7 @@ export function migratePosition(raw: Record<string, unknown>): PositionState {
       pendingZone: (raw.pendingZone as string | null) ?? null,
       pendingZoneCount: (raw.pendingZoneCount as number) ?? 0,
       requireOversoldRecovery: Boolean(raw.requireOversoldRecovery ?? false),
+      lastTrendBias: (raw.lastTrendBias as TrendBias | undefined) ?? 'neutral',
     };
   }
   // Original tier-based format — full migration
@@ -301,5 +322,6 @@ export function migratePosition(raw: Record<string, unknown>): PositionState {
     pendingZone: null,
     pendingZoneCount: 0,
     requireOversoldRecovery: false,
+    lastTrendBias: 'neutral',
   };
 }
