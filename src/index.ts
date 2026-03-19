@@ -80,6 +80,7 @@ if (discordBotToken) {
 async function runTick(): Promise<void> {
   try {
     await bot.tick();
+    logger.saveState('lastTickAt', Date.now());
   } catch (err) {
     console.error('[Main] Unhandled error in tick:', err);
     await notifier.sendAlert(`Bot error: ${(err as Error).message}`);
@@ -112,11 +113,21 @@ if (testCycle) {
     process.exit(1);
   });
 } else {
-  runTick().then(() => {
-    // Schedule subsequent runs
+  const lastTickAt = logger.loadState<number>('lastTickAt');
+  const msSinceLastTick = lastTickAt !== null ? Date.now() - lastTickAt : Infinity;
+  const SKIP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+  if (msSinceLastTick < SKIP_WINDOW_MS) {
+    console.log(`[Main] Skipping initial run — last tick was ${Math.round(msSinceLastTick / 1000)}s ago`);
     cron.schedule(cfg.scheduler.cronExpression, runTick, { timezone: 'UTC' });
     console.log(`[Main] Scheduler active — next runs on cron: ${cfg.scheduler.cronExpression}`);
-  });
+  } else {
+    runTick().then(() => {
+      // Schedule subsequent runs
+      cron.schedule(cfg.scheduler.cronExpression, runTick, { timezone: 'UTC' });
+      console.log(`[Main] Scheduler active — next runs on cron: ${cfg.scheduler.cronExpression}`);
+    });
+  }
 }
 
 // Graceful shutdown
