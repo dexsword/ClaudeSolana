@@ -62,15 +62,15 @@ export class TradingBot {
       return;
     }
 
-    // ── alignToCandle pre-check ─────────────────────────────────────────────
-    // If enabled, only run the full strategy when a new 4h candle has closed
-    // since the last execution. This prevents redundant ticks seeing identical
-    // indicator data and makes zoneConfirmationCandles mean actual candle closes.
+    // ── alignToCandle check ─────────────────────────────────────────────────
+    // Determine whether a new candle has closed since the last full execution.
+    // If not, run a lightweight intracandle dip check (buy-only, no 3d fetch)
+    // instead of the full strategy. This keeps API usage to 1 Birdeye credit
+    // on mid-candle ticks vs 2 on candle-close ticks.
     if (this.cfg.scheduler.alignToCandle && this.position.lastExecutedCandleTs !== null) {
       const tfMs = TradingBot.tfToMs(this.cfg.timeframes.executionTf);
-      const nextExpectedMs = this.position.lastExecutedCandleTs + tfMs;
-      if (now < nextExpectedMs) {
-        console.log(`[Bot] alignToCandle — no new ${this.cfg.timeframes.executionTf} candle expected until ${new Date(nextExpectedMs).toISOString()} — skipping`);
+      if (now < this.position.lastExecutedCandleTs + tfMs) {
+        await this.runIntracandleCheck(now);
         return;
       }
     }
@@ -320,14 +320,126 @@ export class TradingBot {
         break;
     }
 
-    // ── 10. Record candle timestamp and persist state ────────────────────────
-    // Track which candle we just executed on so alignToCandle can skip redundant ticks.
+    // ── 10. Record candle timestamp + SMA and persist state ─────────────────
+    // lastExecutedCandleTs lets alignToCandle skip mid-candle ticks.
+    // lastSma3d is reused by intracandle checks to preserve trend bias
+    // without refetching 3d candles (saves 1 Birdeye credit per mid-candle tick).
     if (this.cfg.scheduler.alignToCandle && candles4h.length > 0) {
       this.position = {
         ...this.position,
         lastExecutedCandleTs: candles4h[candles4h.length - 1].timestamp,
+        lastSma3d: sma3d,
       };
     }
+    this.logger.saveState('position', this.position);
+  }
+
+  /**
+   * Mid-candle dip check: runs on 2h ticks that fall inside a 4h candle window.
+   * Fetches fresh spot price + 4h candles (1 Birdeye credit, skips 3d).
+   * Uses stored lastSma3d for trend bias so no 3d refetch is needed.
+   * Only executes buy actions — sells always wait for candle close.
+   */
+  private async runIntracandleCheck(now: number): Promise<void> {
+    console.log(`\n[Bot] ── Intracandle check at ${new Date(now).toISOString()} (buy-only) ──`);
+
+    const birdeyeKey = process.env.BIRDEYE_API_KEY ?? '';
+    const [candles4h, spotPrice] = await Promise.all([
+      fetchCandles('4h', 100, birdeyeKey),
+      fetchSpotPrice(),
+    ]);
+
+    const { rsi4h, vwap4h, rsiDirection } = getLatestIndicators(
+      candles4h,
+      [],  // skip 3d candles — use stored SMA below
+      this.cfg.strategy.rsi.period,
+      this.cfg.strategy.sma.period,
+    );
+
+    console.log(`[Bot] Spot: $${spotPrice.toFixed(4)} | RSI(4h): ${rsi4h?.toFixed(2) ?? 'N/A'} (${rsiDirection}) | VWAP(4h): ${vwap4h?.toFixed(4) ?? 'N/A'}`);
+
+    this.position = updateTrailingStop(this.position, spotPrice, this.cfg);
+
+    const balances = await this.walletManager.getBalances(spotPrice);
+    const simulated = this.dryRun && this.cfg.network.useDevnet;
+    const availableUSDC = simulated ? this.cfg.capital.startingCapitalUSDC : balances.usdcBalance;
+    const managedSolBalance = this.position.bootstrapDone ? this.position.solBalance : 0;
+    const totalManagedUSDC = managedSolBalance * spotPrice + availableUSDC;
+    const currentSolPct = this.walletManager.computeCurrentSolPct(managedSolBalance, availableUSDC, spotPrice);
+
+    console.log(`[Bot] Allocation — SOL: ${managedSolBalance.toFixed(4)} (${currentSolPct.toFixed(1)}%) | USDC: $${availableUSDC.toFixed(2)}`);
+
+    // Use stored SMA so trend bias is preserved without a 3d candle refetch
+    const signal = evaluateStrategy(
+      spotPrice,
+      rsi4h,
+      vwap4h,
+      this.position.lastSma3d,
+      this.position,
+      this.cfg,
+      now,
+      currentSolPct,
+      rsiDirection,
+    );
+
+    // Intracandle: never sell — only act on buy signals
+    let effectiveAction = signal.action;
+    if (effectiveAction === 'rebalance_sell' || effectiveAction === 'emergency_sell') {
+      effectiveAction = 'hold';
+    }
+
+    // Recovery gate still applies to intracandle buys
+    if (this.position.requireOversoldRecovery && effectiveAction === 'rebalance_buy') {
+      if (signal.zone !== 'moderate_buy' && signal.zone !== 'strong_buy') {
+        effectiveAction = 'hold';
+      } else {
+        this.position = { ...this.position, requireOversoldRecovery: false };
+      }
+    }
+
+    console.log(`[Bot] Intracandle signal: ${signal.action.toUpperCase()} (${signal.zone}) → effective: ${effectiveAction.toUpperCase()} — ${signal.reason}`);
+
+    await this.notifier.sendSignalNotification(
+      { ...signal, action: effectiveAction },
+      this.position.bootstrapDone ? this.position.averageEntryPrice : null,
+    );
+
+    this.logger.logSignal({
+      timestamp: now,
+      action: effectiveAction,
+      reason: `[intracandle] ${signal.reason}`,
+      price: spotPrice,
+      rsi4h,
+      vwap4h,
+      sma3d: this.position.lastSma3d,
+      trendBias: signal.trendBias,
+      executed: effectiveAction !== 'hold',
+    });
+
+    const gasBuffer = balances.solBalance - this.position.solBalance;
+    const lowGas = !simulated && gasBuffer < this.cfg.capital.minSolReserveForGas;
+
+    if (effectiveAction === 'bootstrap') {
+      if (lowGas) { console.warn('[Bot] Intracandle — skipping bootstrap, low gas'); }
+      else {
+        const usdcToSpend = availableUSDC * (signal.targetSolPct / 100);
+        await this.executeRebalanceBuy(usdcToSpend, signal, spotPrice, true);
+      }
+    } else if (effectiveAction === 'rebalance_buy') {
+      if (lowGas) { console.warn('[Bot] Intracandle — skipping dip buy, low gas'); }
+      else {
+        const usdcToSpend = this.walletManager.computeRebalanceBuyAmount(
+          currentSolPct, signal.targetSolPct, totalManagedUSDC, availableUSDC,
+        );
+        if (usdcToSpend < this.cfg.strategy.rebalance.minTradeUSDC) {
+          console.log(`[Bot] Intracandle dip — trade too small ($${usdcToSpend.toFixed(2)}) — skipping`);
+        } else {
+          console.log(`[Bot] Intracandle dip buy — zone: ${signal.zone}, spending $${usdcToSpend.toFixed(2)}`);
+          await this.executeRebalanceBuy(usdcToSpend, signal, spotPrice, false);
+        }
+      }
+    }
+
     this.logger.saveState('position', this.position);
   }
 

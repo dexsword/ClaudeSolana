@@ -38,6 +38,8 @@ export interface PositionState {
 
   // alignToCandle: timestamp (ms) of the last 4h candle the bot executed on
   lastExecutedCandleTs: number | null;
+  // SMA value from last full execution — reused by intracandle check (avoids 3d candle refetch)
+  lastSma3d: number | null;
 }
 
 export interface StrategySignal {

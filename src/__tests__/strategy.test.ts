@@ -76,6 +76,7 @@ const bootstrapped: PositionState = {
   requireOversoldRecovery: false,
   lastTrendBias: 'neutral',
   lastExecutedCandleTs: null,
+  lastSma3d: null,
 };
 
 // ── determineTrendBias ────────────────────────────────────────────────────────
