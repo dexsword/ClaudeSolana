@@ -1,7 +1,10 @@
 /**
  * Backtester for the SOL swing trading strategy.
  *
- * Uses Kraken public API for free historical SOL/USD OHLCV data.
+ * Uses Bybit public API for free historical SOL/USDT OHLCV data.
+ * Bybit has full multi-year history, proper forward pagination, and no
+ * geo-restrictions on public market data.
+ *
  * Imports and calls the exact same strategy/indicator functions used in
  * production — no reimplementation, no drift.
  *
@@ -31,60 +34,78 @@ const cfg: BotConfig = JSON.parse(
 );
 const CAPITAL = cfg.capital.startingCapitalUSDC;
 
-// ── Kraken data fetcher ───────────────────────────────────────────────────────
-// Kraken is a US-based exchange with no geo-restrictions on the public REST API.
-// Interval is in minutes; returns up to 720 candles per request.
-// Format: [time(unix_sec), open, high, low, close, vwap, volume, count]
-const KRAKEN = 'https://api.kraken.com/0/public';
+// ── Bybit data fetcher ────────────────────────────────────────────────────────
+// Bybit public market data API: no auth, no geo-restrictions, full history.
+// Supported spot intervals (minutes): 1,3,5,15,30,60,120,240,360,720,D,W,M
+// Returns newest-first; we page forward in time using start/end windows.
+// Format: [startTime(ms), open, high, low, close, volume, turnover]
+const BYBIT = 'https://api.bybit.com';
 
-type KrakenRow = [number, string, string, string, string, string, string, number];
-interface KrakenOHLCResult { error: string[]; result: Record<string, KrakenRow[] | number> }
+interface BybitKlineResp {
+  retCode: number;
+  retMsg:  string;
+  result:  { list: string[][] };
+}
 
-async function fetchKrakenCandles(
-  intervalMinutes: number,
+async function fetchBybitCandles(
+  interval: string,        // '240' for 4h, 'D' for daily
+  intervalMs: number,      // interval duration in ms (for windowing)
   startMs: number,
   endMs: number,
 ): Promise<Candle[]> {
   const all: Candle[] = [];
-  let since = Math.floor(startMs / 1000); // Kraken uses Unix seconds
+  const windowMs = 1000 * intervalMs; // fetch 1000 candles at a time
+  let windowStart = startMs;
 
-  while (true) {
-    const { data } = await axios.get<KrakenOHLCResult>(`${KRAKEN}/OHLC`, {
-      params: { pair: 'SOLUSD', interval: intervalMinutes, since },
-      timeout: 20000,
+  while (windowStart < endMs) {
+    const windowEnd = Math.min(windowStart + windowMs, endMs);
+
+    const { data } = await axios.get<BybitKlineResp>(`${BYBIT}/v5/market/kline`, {
+      params: {
+        category: 'spot',
+        symbol:   'SOLUSDT',
+        interval,
+        start:    windowStart,
+        end:      windowEnd,
+        limit:    1000,
+      },
+      timeout: 15000,
     });
 
-    if (data.error?.length) throw new Error(`Kraken: ${data.error.join(', ')}`);
+    if (data.retCode !== 0) throw new Error(`Bybit: ${data.retMsg}`);
 
-    // Find the candle array (result has one key per pair + 'last')
-    const pairKey = Object.keys(data.result).find(k => k !== 'last');
-    if (!pairKey) break;
-    const rows = data.result[pairKey] as KrakenRow[];
-    const last  = data.result['last'] as number;
+    const list = data.result?.list ?? [];
+    if (list.length === 0) {
+      windowStart = windowEnd + 1;
+      continue;
+    }
 
-    if (!rows || rows.length === 0) break;
+    // Bybit returns newest-first → reverse to get chronological order
+    const sorted = [...list].reverse();
 
-    for (const k of rows) {
-      const ts = k[0] * 1000; // → ms
-      if (ts > endMs) break;
+    for (const k of sorted) {
+      const ts = parseInt(k[0], 10);
+      if (ts < startMs || ts > endMs) continue;
       all.push({
         timestamp: ts,
         open:   parseFloat(k[1]),
         high:   parseFloat(k[2]),
         low:    parseFloat(k[3]),
         close:  parseFloat(k[4]),
-        volume: parseFloat(k[6]),
+        volume: parseFloat(k[5]),
       });
     }
 
-    const lastRowTs = rows[rows.length - 1][0] * 1000;
-    if (lastRowTs >= endMs || rows.length < 720) break;
-
-    since = last;
-    await new Promise(r => setTimeout(r, 600)); // Kraken: ~1 req/s public limit
+    const lastTs = parseInt(sorted[sorted.length - 1][0], 10);
+    windowStart = lastTs + intervalMs;
+    if (list.length < 1000) break;
+    await new Promise(r => setTimeout(r, 80));
   }
 
-  return all;
+  // Deduplicate and sort (safety net for overlap at window boundaries)
+  return all
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .filter((c, i, arr) => i === 0 || c.timestamp !== arr[i - 1].timestamp);
 }
 
 /** Aggregate daily candles into 3-day OHLCV candles (groups of 3). */
@@ -136,18 +157,21 @@ async function runBacktest(): Promise<void> {
   console.log(`From     : ${new Date(START_MS).toDateString()}`);
   console.log(`To       : ${new Date().toDateString()}\n`);
 
-  // Fetch historical data from Kraken (no geo-restrictions, free public API)
-  process.stdout.write('Fetching 4h candles from Kraken... ');
-  const candles4h = await fetchKrakenCandles(240, START_MS, endMs);
+  // Fetch historical data from Bybit (free public API, no geo-restrictions, full history)
+  const h4ms  = 4  * 60 * 60 * 1000;   // 4h in ms
+  const dayMs = 24 * 60 * 60 * 1000;   // 1d in ms
+
+  process.stdout.write('Fetching 4h candles from Bybit... ');
+  const candles4h = await fetchBybitCandles('240', h4ms, START_MS, endMs);
   console.log(`${candles4h.length} candles`);
 
-  process.stdout.write('Fetching daily candles from Kraken (→ 3d)... ');
-  const dailyCandles = await fetchKrakenCandles(1440, START_MS, endMs);
+  process.stdout.write('Fetching daily candles from Bybit (→ 3d)... ');
+  const dailyCandles = await fetchBybitCandles('D', dayMs, START_MS, endMs);
   const candles3d = aggregateTo3d(dailyCandles);
   console.log(`${dailyCandles.length} daily → ${candles3d.length} 3d candles\n`);
 
   if (candles4h.length < 20 || candles3d.length < 5) {
-    console.error('Not enough historical data. Check your --from date and network connectivity.');
+    console.error('Not enough historical data. Check your --from date and that api.bybit.com is reachable.');
     process.exit(1);
   }
 
