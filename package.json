@@ -11,7 +11,8 @@
     "test": "jest --forceExit",
     "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts",
-    "backtest": "npx ts-node src/backtest.ts"
+    "backtest": "npx ts-node src/backtest.ts",
+    "optimize": "npx ts-node src/optimize.ts"
   },
   "dependencies": {
     "@solana/web3.js": "^1.91.8",
