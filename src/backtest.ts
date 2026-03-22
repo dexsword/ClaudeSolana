@@ -29,10 +29,9 @@ const args = process.argv.slice(2);
 const fromArg  = args.find(a => a.startsWith('--from='))?.split('=')[1];
 const slipArg  = args.find(a => a.startsWith('--slippage='))?.split('=')[1];
 
-// Default: Jan 2022 — SOL was ~$170 and falling off the Nov 2021 ATH.
-// Comparable to entering now (Mar 2026) where SOL is ~$87 in a bear trend.
+// Default: Mar 2022 — SOL was ~$80, comparable to now (Mar 2026 ~$87), both in bear trends.
 // Full cycle: 2022 crash → 2023 recovery → 2024-25 bull → current bear.
-const START_MS  = fromArg ? new Date(fromArg).getTime() : new Date('2022-01-01').getTime();
+const START_MS  = fromArg ? new Date(fromArg).getTime() : new Date('2022-03-01').getTime();
 const CC_KEY    = process.env.CRYPTOCOMPARE_API_KEY ?? '';
 if (!CC_KEY) {
   console.error('ERROR: CRYPTOCOMPARE_API_KEY is not set.');
