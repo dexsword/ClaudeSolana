@@ -1,9 +1,13 @@
 /**
  * Backtester for the SOL swing trading strategy.
  *
- * Uses Bybit public API for free historical SOL/USDT OHLCV data.
- * Bybit has full multi-year history, proper forward pagination, and no
- * geo-restrictions on public market data.
+ * Uses Yahoo Finance (query1.finance.yahoo.com) for historical SOL-USD OHLCV.
+ * Yahoo Finance is a financial data provider — not a crypto exchange — so it is
+ * accessible everywhere without geo-restrictions or API keys.
+ *
+ * Data limits:
+ *   4h candles  — aggregated from 1h data; Yahoo provides last ~730 days
+ *   3d candles  — aggregated from daily data; Yahoo provides full history (2020+)
  *
  * Imports and calls the exact same strategy/indicator functions used in
  * production — no reimplementation, no drift.
@@ -25,7 +29,9 @@ const args = process.argv.slice(2);
 const fromArg  = args.find(a => a.startsWith('--from='))?.split('=')[1];
 const slipArg  = args.find(a => a.startsWith('--slippage='))?.split('=')[1];
 
-const START_MS  = fromArg ? new Date(fromArg).getTime() : new Date('2021-11-01').getTime();
+// Yahoo Finance 1h data is capped at ~730 days; default to 2 years ago
+const TWO_YEARS_AGO = Date.now() - 730 * 24 * 60 * 60 * 1000;
+const START_MS = fromArg ? Math.max(new Date(fromArg).getTime(), TWO_YEARS_AGO) : TWO_YEARS_AGO;
 const SLIPPAGE  = slipArg ? parseFloat(slipArg) / 100 : 0.002; // default 0.2%
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -34,78 +40,83 @@ const cfg: BotConfig = JSON.parse(
 );
 const CAPITAL = cfg.capital.startingCapitalUSDC;
 
-// ── Bybit data fetcher ────────────────────────────────────────────────────────
-// Bybit public market data API: no auth, no geo-restrictions, full history.
-// Supported spot intervals (minutes): 1,3,5,15,30,60,120,240,360,720,D,W,M
-// Returns newest-first; we page forward in time using start/end windows.
-// Format: [startTime(ms), open, high, low, close, volume, turnover]
-const BYBIT = 'https://api.bybit.com';
+// ── Yahoo Finance data fetcher ─────────────────────────────────────────────────
+// Yahoo Finance is a financial data provider accessible everywhere.
+// No API key required. Returns OHLCV in a single response per interval/range.
+//
+// Hourly (1h) data: Yahoo provides last ~730 days (2y range).
+// Daily (1d) data: Yahoo provides full history from SOL listing (~2020+).
+const YAHOO = 'https://query1.finance.yahoo.com/v8/finance/chart/SOL-USD';
 
-interface BybitKlineResp {
-  retCode: number;
-  retMsg:  string;
-  result:  { list: string[][] };
+interface YahooChartResp {
+  chart: {
+    result?: Array<{
+      timestamp: number[];
+      indicators: {
+        quote: Array<{
+          open:   (number | null)[];
+          high:   (number | null)[];
+          low:    (number | null)[];
+          close:  (number | null)[];
+          volume: (number | null)[];
+        }>;
+      };
+    }>;
+    error?: { code: string; description: string };
+  };
 }
 
-async function fetchBybitCandles(
-  interval: string,        // '240' for 4h, 'D' for daily
-  intervalMs: number,      // interval duration in ms (for windowing)
-  startMs: number,
-  endMs: number,
-): Promise<Candle[]> {
-  const all: Candle[] = [];
-  const windowMs = 1000 * intervalMs; // fetch 1000 candles at a time
-  let windowStart = startMs;
+async function fetchYahooCandles(interval: string, range: string): Promise<Candle[]> {
+  const { data } = await axios.get<YahooChartResp>(YAHOO, {
+    params: { interval, range, includePrePost: false },
+    // Yahoo Finance requires a User-Agent header
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; sol-backtester/1.0)' },
+    timeout: 30000,
+  });
 
-  while (windowStart < endMs) {
-    const windowEnd = Math.min(windowStart + windowMs, endMs);
+  if (data.chart.error) {
+    throw new Error(`Yahoo Finance: ${data.chart.error.description}`);
+  }
+  const result = data.chart.result?.[0];
+  if (!result) throw new Error('Yahoo Finance: empty response');
 
-    const { data } = await axios.get<BybitKlineResp>(`${BYBIT}/v5/market/kline`, {
-      params: {
-        category: 'spot',
-        symbol:   'SOLUSDT',
-        interval,
-        start:    windowStart,
-        end:      windowEnd,
-        limit:    1000,
-      },
-      timeout: 15000,
+  const ts = result.timestamp;
+  const q  = result.indicators.quote[0];
+  const candles: Candle[] = [];
+
+  for (let i = 0; i < ts.length; i++) {
+    const o = q.open[i], h = q.high[i], l = q.low[i], c = q.close[i];
+    if (o == null || h == null || l == null || c == null) continue;
+    candles.push({
+      timestamp: ts[i] * 1000,   // Yahoo returns Unix seconds → convert to ms
+      open: o, high: h, low: l, close: c,
+      volume: q.volume[i] ?? 0,
     });
-
-    if (data.retCode !== 0) throw new Error(`Bybit: ${data.retMsg}`);
-
-    const list = data.result?.list ?? [];
-    if (list.length === 0) {
-      windowStart = windowEnd + 1;
-      continue;
-    }
-
-    // Bybit returns newest-first → reverse to get chronological order
-    const sorted = [...list].reverse();
-
-    for (const k of sorted) {
-      const ts = parseInt(k[0], 10);
-      if (ts < startMs || ts > endMs) continue;
-      all.push({
-        timestamp: ts,
-        open:   parseFloat(k[1]),
-        high:   parseFloat(k[2]),
-        low:    parseFloat(k[3]),
-        close:  parseFloat(k[4]),
-        volume: parseFloat(k[5]),
-      });
-    }
-
-    const lastTs = parseInt(sorted[sorted.length - 1][0], 10);
-    windowStart = lastTs + intervalMs;
-    if (list.length < 1000) break;
-    await new Promise(r => setTimeout(r, 80));
   }
 
-  // Deduplicate and sort (safety net for overlap at window boundaries)
-  return all
-    .sort((a, b) => a.timestamp - b.timestamp)
-    .filter((c, i, arr) => i === 0 || c.timestamp !== arr[i - 1].timestamp);
+  return candles;
+}
+
+/** Aggregate hourly candles into 4h buckets aligned to UTC. */
+function aggregateTo4h(hourly: Candle[]): Candle[] {
+  const h4ms = 4 * 60 * 60 * 1000;
+  const buckets = new Map<number, Candle[]>();
+  for (const c of hourly) {
+    const key = Math.floor(c.timestamp / h4ms) * h4ms;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key)!.push(c);
+  }
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a - b)
+    .filter(([, cs]) => cs.length >= 3)  // skip buckets missing >1 hour of data
+    .map(([ts, cs]) => ({
+      timestamp: ts,
+      open:   cs[0].open,
+      high:   Math.max(...cs.map(c => c.high)),
+      low:    Math.min(...cs.map(c => c.low)),
+      close:  cs[cs.length - 1].close,
+      volume: cs.reduce((a, c) => a + c.volume, 0),
+    }));
 }
 
 /** Aggregate daily candles into 3-day OHLCV candles (groups of 3). */
@@ -157,21 +168,21 @@ async function runBacktest(): Promise<void> {
   console.log(`From     : ${new Date(START_MS).toDateString()}`);
   console.log(`To       : ${new Date().toDateString()}\n`);
 
-  // Fetch historical data from Bybit (free public API, no geo-restrictions, full history)
-  const h4ms  = 4  * 60 * 60 * 1000;   // 4h in ms
-  const dayMs = 24 * 60 * 60 * 1000;   // 1d in ms
+  // Fetch historical OHLCV from Yahoo Finance (no geo-restrictions, no API key)
+  process.stdout.write('Fetching 1h candles from Yahoo Finance (2y)... ');
+  const hourlyCandles = await fetchYahooCandles('1h', '2y');
+  // Filter to requested start date, then aggregate to 4h
+  const filteredHourly = hourlyCandles.filter(c => c.timestamp >= START_MS);
+  const candles4h = aggregateTo4h(filteredHourly);
+  console.log(`${hourlyCandles.length} hourly → ${candles4h.length} 4h candles`);
 
-  process.stdout.write('Fetching 4h candles from Bybit... ');
-  const candles4h = await fetchBybitCandles('240', h4ms, START_MS, endMs);
-  console.log(`${candles4h.length} candles`);
-
-  process.stdout.write('Fetching daily candles from Bybit (→ 3d)... ');
-  const dailyCandles = await fetchBybitCandles('D', dayMs, START_MS, endMs);
+  process.stdout.write('Fetching daily candles from Yahoo Finance (max)... ');
+  const dailyCandles = await fetchYahooCandles('1d', 'max');
   const candles3d = aggregateTo3d(dailyCandles);
   console.log(`${dailyCandles.length} daily → ${candles3d.length} 3d candles\n`);
 
   if (candles4h.length < 20 || candles3d.length < 5) {
-    console.error('Not enough historical data. Check your --from date and that api.bybit.com is reachable.');
+    console.error('Not enough historical data. Check network connectivity to query1.finance.yahoo.com.');
     process.exit(1);
   }
 
