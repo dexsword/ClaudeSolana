@@ -382,9 +382,11 @@ export class TradingBot {
       rsiDirection,
     );
 
-    // Intracandle: never sell — only act on buy signals
+    // Intracandle: discretionary sells wait for candle close, but trailing-stop
+    // / stop-loss (emergency_sell) fires immediately to protect against large
+    // intracandle drops after a rally.
     let effectiveAction = signal.action;
-    if (effectiveAction === 'rebalance_sell' || effectiveAction === 'emergency_sell') {
+    if (effectiveAction === 'rebalance_sell') {
       effectiveAction = 'hold';
     }
 
@@ -438,6 +440,16 @@ export class TradingBot {
           await this.executeRebalanceBuy(usdcToSpend, signal, spotPrice, false);
         }
       }
+    } else if (effectiveAction === 'emergency_sell') {
+      console.warn('[Bot] Intracandle — trailing stop triggered, executing emergency sell');
+      const solToSell = this.walletManager.computeRebalanceSellAmount(
+        currentSolPct,
+        signal.targetSolPct,
+        totalManagedUSDC,
+        spotPrice,
+        this.position.solBalance,
+      );
+      await this.executeRebalanceSell(solToSell, signal, spotPrice, balances.solBalance, true);
     }
 
     this.logger.saveState('position', this.position);
