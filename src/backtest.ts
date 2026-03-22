@@ -1,13 +1,13 @@
 /**
  * Backtester for the SOL swing trading strategy.
  *
- * Uses Binance public API for free historical SOL/USDT OHLCV data.
+ * Uses Kraken public API for free historical SOL/USD OHLCV data.
  * Imports and calls the exact same strategy/indicator functions used in
  * production — no reimplementation, no drift.
  *
  * Usage:
  *   npm run backtest
- *   npx ts-node src/backtest.ts [--from YYYY-MM-DD] [--slippage 0.2]
+ *   npx ts-node src/backtest.ts [--from=YYYY-MM-DD] [--slippage=0.2]
  */
 
 import axios from 'axios';
@@ -31,43 +31,77 @@ const cfg: BotConfig = JSON.parse(
 );
 const CAPITAL = cfg.capital.startingCapitalUSDC;
 
-// ── Binance data fetcher ──────────────────────────────────────────────────────
-const BINANCE = 'https://api.binance.com';
-const SYMBOL  = 'SOLUSDT';
+// ── Kraken data fetcher ───────────────────────────────────────────────────────
+// Kraken is a US-based exchange with no geo-restrictions on the public REST API.
+// Interval is in minutes; returns up to 720 candles per request.
+// Format: [time(unix_sec), open, high, low, close, vwap, volume, count]
+const KRAKEN = 'https://api.kraken.com/0/public';
 
-async function fetchBinanceCandles(
-  interval: string,
+type KrakenRow = [number, string, string, string, string, string, string, number];
+interface KrakenOHLCResult { error: string[]; result: Record<string, KrakenRow[] | number> }
+
+async function fetchKrakenCandles(
+  intervalMinutes: number,
   startMs: number,
   endMs: number,
 ): Promise<Candle[]> {
   const all: Candle[] = [];
-  let from = startMs;
+  let since = Math.floor(startMs / 1000); // Kraken uses Unix seconds
 
-  while (from < endMs) {
-    const { data } = await axios.get<unknown[][]>(`${BINANCE}/api/v3/klines`, {
-      params: { symbol: SYMBOL, interval, startTime: from, endTime: endMs, limit: 1000 },
-      timeout: 15000,
+  while (true) {
+    const { data } = await axios.get<KrakenOHLCResult>(`${KRAKEN}/OHLC`, {
+      params: { pair: 'SOLUSD', interval: intervalMinutes, since },
+      timeout: 20000,
     });
-    if (data.length === 0) break;
 
-    for (const k of data) {
+    if (data.error?.length) throw new Error(`Kraken: ${data.error.join(', ')}`);
+
+    // Find the candle array (result has one key per pair + 'last')
+    const pairKey = Object.keys(data.result).find(k => k !== 'last');
+    if (!pairKey) break;
+    const rows = data.result[pairKey] as KrakenRow[];
+    const last  = data.result['last'] as number;
+
+    if (!rows || rows.length === 0) break;
+
+    for (const k of rows) {
+      const ts = k[0] * 1000; // → ms
+      if (ts > endMs) break;
       all.push({
-        timestamp: k[0] as number,
-        open:      parseFloat(k[1] as string),
-        high:      parseFloat(k[2] as string),
-        low:       parseFloat(k[3] as string),
-        close:     parseFloat(k[4] as string),
-        volume:    parseFloat(k[5] as string),
+        timestamp: ts,
+        open:   parseFloat(k[1]),
+        high:   parseFloat(k[2]),
+        low:    parseFloat(k[3]),
+        close:  parseFloat(k[4]),
+        volume: parseFloat(k[6]),
       });
     }
 
-    const lastCloseTime = data[data.length - 1][6] as number;
-    from = lastCloseTime + 1;
-    if (data.length < 1000) break;
-    await new Promise(r => setTimeout(r, 120)); // stay well under Binance rate limit
+    const lastRowTs = rows[rows.length - 1][0] * 1000;
+    if (lastRowTs >= endMs || rows.length < 720) break;
+
+    since = last;
+    await new Promise(r => setTimeout(r, 600)); // Kraken: ~1 req/s public limit
   }
 
   return all;
+}
+
+/** Aggregate daily candles into 3-day OHLCV candles (groups of 3). */
+function aggregateTo3d(daily: Candle[]): Candle[] {
+  const result: Candle[] = [];
+  for (let i = 0; i + 2 < daily.length; i += 3) {
+    const chunk = daily.slice(i, i + 3);
+    result.push({
+      timestamp: chunk[0].timestamp,
+      open:   chunk[0].open,
+      high:   Math.max(...chunk.map(c => c.high)),
+      low:    Math.min(...chunk.map(c => c.low)),
+      close:  chunk[2].close,
+      volume: chunk.reduce((a, c) => a + c.volume, 0),
+    });
+  }
+  return result;
 }
 
 // ── Trade & equity types ──────────────────────────────────────────────────────
@@ -102,17 +136,18 @@ async function runBacktest(): Promise<void> {
   console.log(`From     : ${new Date(START_MS).toDateString()}`);
   console.log(`To       : ${new Date().toDateString()}\n`);
 
-  // Fetch historical data
-  process.stdout.write('Fetching 4h candles from Binance... ');
-  const candles4h = await fetchBinanceCandles('4h', START_MS, endMs);
+  // Fetch historical data from Kraken (no geo-restrictions, free public API)
+  process.stdout.write('Fetching 4h candles from Kraken... ');
+  const candles4h = await fetchKrakenCandles(240, START_MS, endMs);
   console.log(`${candles4h.length} candles`);
 
-  process.stdout.write('Fetching 3d candles from Binance... ');
-  const candles3d = await fetchBinanceCandles('3d', START_MS, endMs);
-  console.log(`${candles3d.length} candles\n`);
+  process.stdout.write('Fetching daily candles from Kraken (→ 3d)... ');
+  const dailyCandles = await fetchKrakenCandles(1440, START_MS, endMs);
+  const candles3d = aggregateTo3d(dailyCandles);
+  console.log(`${dailyCandles.length} daily → ${candles3d.length} 3d candles\n`);
 
   if (candles4h.length < 20 || candles3d.length < 5) {
-    console.error('Not enough historical data. Check START_MS and Binance connectivity.');
+    console.error('Not enough historical data. Check your --from date and network connectivity.');
     process.exit(1);
   }
 
