@@ -1,25 +1,18 @@
 /**
  * Backtester for the SOL swing trading strategy.
  *
- * Uses CoinGecko public API for historical SOL-USD OHLCV data.
- * No geo-restrictions. Free tier works without an API key.
+ * Uses CryptoCompare API for historical SOL-USD OHLCV data.
+ *   - Full history from SOL listing (~2020) to present
+ *   - Real OHLCV: accurate VWAP, RSI, and SMA3d
+ *   - 2000 candles per request — only ~18 calls for 4 years of hourly data
  *
- * Data sources:
- *   4h candles — /market_chart/range paginates hourly price data in 80-day windows,
- *                then aggregates to 4h. VWAP uses close as typical price (approximation)
- *                since market_chart only provides close prices, not OHLC.
- *   3d candles — /ohlc?days=max provides real daily OHLCV back to 2020, aggregated to 3d.
- *
- * Optional: set COINGECKO_DEMO_API_KEY env var for higher rate limits (30 req/min).
- * Get a free demo key at coingecko.com/en/developers/dashboard
- *
- * Imports and calls the exact same strategy/indicator functions used in
- * production — no reimplementation, no drift.
+ * Requires a free API key (30 seconds to get):
+ *   https://www.cryptocompare.com/cryptopian/api-keys
+ *   export CRYPTOCOMPARE_API_KEY=your_key_here
  *
  * Usage:
- *   npm run backtest
- *   COINGECKO_DEMO_API_KEY=xxx npm run backtest
- *   npx ts-node src/backtest.ts [--from=YYYY-MM-DD] [--slippage=0.2]
+ *   CRYPTOCOMPARE_API_KEY=xxx npm run backtest
+ *   CRYPTOCOMPARE_API_KEY=xxx npx ts-node src/backtest.ts [--from=YYYY-MM-DD] [--slippage=0.2]
  */
 
 import axios from 'axios';
@@ -34,7 +27,14 @@ const args = process.argv.slice(2);
 const fromArg  = args.find(a => a.startsWith('--from='))?.split('=')[1];
 const slipArg  = args.find(a => a.startsWith('--slippage='))?.split('=')[1];
 
-const START_MS = fromArg ? new Date(fromArg).getTime() : new Date('2021-11-01').getTime();
+const START_MS  = fromArg ? new Date(fromArg).getTime() : new Date('2021-11-01').getTime();
+const CC_KEY    = process.env.CRYPTOCOMPARE_API_KEY ?? '';
+if (!CC_KEY) {
+  console.error('ERROR: CRYPTOCOMPARE_API_KEY is not set.');
+  console.error('Get a free key in 30 seconds at: https://www.cryptocompare.com/cryptopian/api-keys');
+  console.error('Then run: CRYPTOCOMPARE_API_KEY=your_key npm run backtest');
+  process.exit(1);
+}
 const SLIPPAGE  = slipArg ? parseFloat(slipArg) / 100 : 0.002; // default 0.2%
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -43,85 +43,72 @@ const cfg: BotConfig = JSON.parse(
 );
 const CAPITAL = cfg.capital.startingCapitalUSDC;
 
-// ── CoinGecko data fetcher ────────────────────────────────────────────────────
-// CoinGecko public API: no geo-restrictions.
-// Free tier works without a key but is rate-limited (~10-30 req/min).
-// Set COINGECKO_DEMO_API_KEY for higher limits (free from coingecko.com).
-//
-// /market_chart/range  → hourly price+volume for ranges 1-90 days
-// /ohlc?days=max       → real daily OHLCV from SOL listing onwards
-const CG_BASE   = 'https://api.coingecko.com/api/v3';
-const CG_API_KEY = process.env.COINGECKO_DEMO_API_KEY ?? '';
-// Without a key: ~10 req/min → use 7s delay. With a key: 30 req/min → 2s.
-const CG_DELAY_MS = CG_API_KEY ? 2000 : 7000;
+// ── CryptoCompare data fetcher ────────────────────────────────────────────────
+// CryptoCompare provides real OHLCV (open, high, low, close, volume) for all
+// periods — no close-price approximation. 2000 candles per request.
+// Free API key: https://www.cryptocompare.com/cryptopian/api-keys
+const CC_BASE = 'https://min-api.cryptocompare.com/data/v2';
 
-function cgHeaders(): Record<string, string> {
-  return CG_API_KEY ? { 'x-cg-demo-api-key': CG_API_KEY } : {};
-}
-
-interface CoinGeckoMarketChart {
-  prices:        [number, number][];   // [timestamp_ms, price]
-  total_volumes: [number, number][];   // [timestamp_ms, volume_usd]
+interface CCHistoResp {
+  Response: string;
+  Message:  string;
+  Data: {
+    Data: Array<{
+      time:       number;   // Unix seconds
+      open:       number;
+      high:       number;
+      low:        number;
+      close:      number;
+      volumefrom: number;   // volume in SOL
+    }>;
+  };
 }
 
 /**
- * Fetch hourly SOL-USD price data from CoinGecko in paginated 80-day windows.
- * market_chart/range only gives close price (no OHLC), so high=low=close.
- * VWAP will use close as typical price — a known approximation.
+ * Fetch SOL-USD OHLCV from CryptoCompare, paginating backwards in 2000-candle
+ * batches until startMs is reached. Works for both histohour and histoday.
  */
-async function fetchCoinGeckoHourly(startMs: number, endMs: number): Promise<Candle[]> {
+async function fetchCCCandles(
+  endpoint: 'histohour' | 'histoday',
+  startMs:  number,
+  endMs:    number,
+): Promise<Candle[]> {
   const all: Candle[] = [];
-  const windowMs  = 80 * 24 * 60 * 60 * 1000;  // 80-day windows → stays hourly
-  let   windowEnd = endMs;
+  const startSec = Math.floor(startMs / 1000);
+  let   toTs     = Math.floor(endMs   / 1000);
 
-  // Page backwards from now to startMs
-  while (windowEnd > startMs) {
-    const windowStart = Math.max(windowEnd - windowMs, startMs);
-    const fromSec = Math.floor(windowStart / 1000);
-    const toSec   = Math.floor(windowEnd   / 1000);
+  while (true) {
+    const { data } = await axios.get<CCHistoResp>(`${CC_BASE}/${endpoint}`, {
+      params:  { fsym: 'SOL', tsym: 'USD', limit: 2000, toTs, api_key: CC_KEY },
+      timeout: 20000,
+    });
 
-    const { data } = await axios.get<CoinGeckoMarketChart>(
-      `${CG_BASE}/coins/solana/market_chart/range`,
-      {
-        params:  { vs_currency: 'usd', from: fromSec, to: toSec },
-        headers: cgHeaders(),
-        timeout: 20000,
-      },
-    );
+    if (data.Response !== 'Success') throw new Error(`CryptoCompare: ${data.Message}`);
 
-    for (let i = 0; i < data.prices.length; i++) {
-      const [ts, price] = data.prices[i];
-      const vol = data.total_volumes[i]?.[1] ?? 0;
-      if (ts < startMs || ts > endMs) continue;
-      all.push({ timestamp: ts, open: price, high: price, low: price, close: price, volume: vol });
+    const rows = data.Data.Data;
+    if (!rows.length) break;
+
+    for (const r of rows) {
+      if (r.time < startSec || r.time * 1000 > endMs) continue;
+      if (r.open === 0 && r.close === 0) continue;  // before SOL listing
+      all.push({
+        timestamp: r.time * 1000,
+        open:      r.open,
+        high:      r.high,
+        low:       r.low,
+        close:     r.close,
+        volume:    r.volumefrom,
+      });
     }
 
     process.stdout.write('.');
-    windowEnd = windowStart - 1;
-    if (windowEnd > startMs) await new Promise(r => setTimeout(r, CG_DELAY_MS));
+    const firstTime = rows[0].time;
+    if (firstTime <= startSec || rows.length < 2000) break;
+    toTs = firstTime - 1;
+    await new Promise(r => setTimeout(r, 150));
   }
 
-  // Sort chronologically (we fetched backwards)
   return all.sort((a, b) => a.timestamp - b.timestamp);
-}
-
-/**
- * Fetch full daily OHLCV history from CoinGecko /ohlc endpoint.
- * This gives real open/high/low/close for proper VWAP on the 3d SMA candles.
- */
-async function fetchCoinGeckoDailyOHLC(): Promise<Candle[]> {
-  const { data } = await axios.get<number[][]>(
-    `${CG_BASE}/coins/solana/ohlc`,
-    {
-      params:  { vs_currency: 'usd', days: 'max' },
-      headers: cgHeaders(),
-      timeout: 20000,
-    },
-  );
-  // Response: [[timestamp_ms, open, high, low, close], ...]
-  return data.map(([ts, o, h, l, c]) => ({
-    timestamp: ts, open: o, high: h, low: l, close: c, volume: 0,
-  }));
 }
 
 /** Aggregate hourly candles into 4h buckets aligned to UTC. */
@@ -195,25 +182,20 @@ async function runBacktest(): Promise<void> {
   console.log(`From     : ${new Date(START_MS).toDateString()}`);
   console.log(`To       : ${new Date().toDateString()}\n`);
 
-  if (!CG_API_KEY) {
-    console.log('Tip: set COINGECKO_DEMO_API_KEY env var for faster fetching (free at coingecko.com)\n');
-  }
-
-  // Fetch 4h candles: hourly data paginated backwards in 80-day windows → aggregate to 4h
-  process.stdout.write(`Fetching hourly data from CoinGecko (${new Date(START_MS).getFullYear()}→now) `);
-  const hourlyCandles = await fetchCoinGeckoHourly(START_MS, endMs);
+  // Fetch 4h candles: paginate hourly OHLCV backwards in 2000-candle batches → aggregate to 4h
+  process.stdout.write(`Fetching hourly OHLCV from CryptoCompare (${new Date(START_MS).getFullYear()}→now) `);
+  const hourlyCandles = await fetchCCCandles('histohour', START_MS, endMs);
   const candles4h = aggregateTo4h(hourlyCandles);
   console.log(` ${hourlyCandles.length} hourly → ${candles4h.length} 4h candles`);
 
-  // Fetch 3d candles: full daily OHLCV history → aggregate to 3d (for SMA3d)
-  process.stdout.write('Fetching daily OHLCV from CoinGecko (max)... ');
-  await new Promise(r => setTimeout(r, CG_DELAY_MS));
-  const dailyCandles = await fetchCoinGeckoDailyOHLC();
+  // Fetch 3d candles: daily OHLCV full history → aggregate to 3d (for SMA3d)
+  process.stdout.write('Fetching daily OHLCV from CryptoCompare (full history) ');
+  const dailyCandles = await fetchCCCandles('histoday', START_MS, endMs);
   const candles3d = aggregateTo3d(dailyCandles);
-  console.log(`${dailyCandles.length} daily → ${candles3d.length} 3d candles\n`);
+  console.log(` ${dailyCandles.length} daily → ${candles3d.length} 3d candles\n`);
 
   if (candles4h.length < 20 || candles3d.length < 5) {
-    console.error('Not enough data. Check connectivity to api.coingecko.com, or try again (rate limit).');
+    console.error('Not enough data returned. Check your CRYPTOCOMPARE_API_KEY and network connectivity.');
     process.exit(1);
   }
 
