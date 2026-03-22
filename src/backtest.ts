@@ -1,19 +1,24 @@
 /**
  * Backtester for the SOL swing trading strategy.
  *
- * Uses Yahoo Finance (query1.finance.yahoo.com) for historical SOL-USD OHLCV.
- * Yahoo Finance is a financial data provider — not a crypto exchange — so it is
- * accessible everywhere without geo-restrictions or API keys.
+ * Uses CoinGecko public API for historical SOL-USD OHLCV data.
+ * No geo-restrictions. Free tier works without an API key.
  *
- * Data limits:
- *   4h candles  — aggregated from 1h data; Yahoo provides last ~730 days
- *   3d candles  — aggregated from daily data; Yahoo provides full history (2020+)
+ * Data sources:
+ *   4h candles — /market_chart/range paginates hourly price data in 80-day windows,
+ *                then aggregates to 4h. VWAP uses close as typical price (approximation)
+ *                since market_chart only provides close prices, not OHLC.
+ *   3d candles — /ohlc?days=max provides real daily OHLCV back to 2020, aggregated to 3d.
+ *
+ * Optional: set COINGECKO_DEMO_API_KEY env var for higher rate limits (30 req/min).
+ * Get a free demo key at coingecko.com/en/developers/dashboard
  *
  * Imports and calls the exact same strategy/indicator functions used in
  * production — no reimplementation, no drift.
  *
  * Usage:
  *   npm run backtest
+ *   COINGECKO_DEMO_API_KEY=xxx npm run backtest
  *   npx ts-node src/backtest.ts [--from=YYYY-MM-DD] [--slippage=0.2]
  */
 
@@ -29,9 +34,7 @@ const args = process.argv.slice(2);
 const fromArg  = args.find(a => a.startsWith('--from='))?.split('=')[1];
 const slipArg  = args.find(a => a.startsWith('--slippage='))?.split('=')[1];
 
-// Yahoo Finance 1h data is capped at ~730 days; default to 2 years ago
-const TWO_YEARS_AGO = Date.now() - 730 * 24 * 60 * 60 * 1000;
-const START_MS = fromArg ? Math.max(new Date(fromArg).getTime(), TWO_YEARS_AGO) : TWO_YEARS_AGO;
+const START_MS = fromArg ? new Date(fromArg).getTime() : new Date('2021-11-01').getTime();
 const SLIPPAGE  = slipArg ? parseFloat(slipArg) / 100 : 0.002; // default 0.2%
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -40,61 +43,85 @@ const cfg: BotConfig = JSON.parse(
 );
 const CAPITAL = cfg.capital.startingCapitalUSDC;
 
-// ── Yahoo Finance data fetcher ─────────────────────────────────────────────────
-// Yahoo Finance is a financial data provider accessible everywhere.
-// No API key required. Returns OHLCV in a single response per interval/range.
+// ── CoinGecko data fetcher ────────────────────────────────────────────────────
+// CoinGecko public API: no geo-restrictions.
+// Free tier works without a key but is rate-limited (~10-30 req/min).
+// Set COINGECKO_DEMO_API_KEY for higher limits (free from coingecko.com).
 //
-// Hourly (1h) data: Yahoo provides last ~730 days (2y range).
-// Daily (1d) data: Yahoo provides full history from SOL listing (~2020+).
-const YAHOO = 'https://query1.finance.yahoo.com/v8/finance/chart/SOL-USD';
+// /market_chart/range  → hourly price+volume for ranges 1-90 days
+// /ohlc?days=max       → real daily OHLCV from SOL listing onwards
+const CG_BASE   = 'https://api.coingecko.com/api/v3';
+const CG_API_KEY = process.env.COINGECKO_DEMO_API_KEY ?? '';
+// Without a key: ~10 req/min → use 7s delay. With a key: 30 req/min → 2s.
+const CG_DELAY_MS = CG_API_KEY ? 2000 : 7000;
 
-interface YahooChartResp {
-  chart: {
-    result?: Array<{
-      timestamp: number[];
-      indicators: {
-        quote: Array<{
-          open:   (number | null)[];
-          high:   (number | null)[];
-          low:    (number | null)[];
-          close:  (number | null)[];
-          volume: (number | null)[];
-        }>;
-      };
-    }>;
-    error?: { code: string; description: string };
-  };
+function cgHeaders(): Record<string, string> {
+  return CG_API_KEY ? { 'x-cg-demo-api-key': CG_API_KEY } : {};
 }
 
-async function fetchYahooCandles(interval: string, range: string): Promise<Candle[]> {
-  const { data } = await axios.get<YahooChartResp>(YAHOO, {
-    params: { interval, range, includePrePost: false },
-    // Yahoo Finance requires a User-Agent header
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; sol-backtester/1.0)' },
-    timeout: 30000,
-  });
+interface CoinGeckoMarketChart {
+  prices:        [number, number][];   // [timestamp_ms, price]
+  total_volumes: [number, number][];   // [timestamp_ms, volume_usd]
+}
 
-  if (data.chart.error) {
-    throw new Error(`Yahoo Finance: ${data.chart.error.description}`);
+/**
+ * Fetch hourly SOL-USD price data from CoinGecko in paginated 80-day windows.
+ * market_chart/range only gives close price (no OHLC), so high=low=close.
+ * VWAP will use close as typical price — a known approximation.
+ */
+async function fetchCoinGeckoHourly(startMs: number, endMs: number): Promise<Candle[]> {
+  const all: Candle[] = [];
+  const windowMs  = 80 * 24 * 60 * 60 * 1000;  // 80-day windows → stays hourly
+  let   windowEnd = endMs;
+
+  // Page backwards from now to startMs
+  while (windowEnd > startMs) {
+    const windowStart = Math.max(windowEnd - windowMs, startMs);
+    const fromSec = Math.floor(windowStart / 1000);
+    const toSec   = Math.floor(windowEnd   / 1000);
+
+    const { data } = await axios.get<CoinGeckoMarketChart>(
+      `${CG_BASE}/coins/solana/market_chart/range`,
+      {
+        params:  { vs_currency: 'usd', from: fromSec, to: toSec },
+        headers: cgHeaders(),
+        timeout: 20000,
+      },
+    );
+
+    for (let i = 0; i < data.prices.length; i++) {
+      const [ts, price] = data.prices[i];
+      const vol = data.total_volumes[i]?.[1] ?? 0;
+      if (ts < startMs || ts > endMs) continue;
+      all.push({ timestamp: ts, open: price, high: price, low: price, close: price, volume: vol });
+    }
+
+    process.stdout.write('.');
+    windowEnd = windowStart - 1;
+    if (windowEnd > startMs) await new Promise(r => setTimeout(r, CG_DELAY_MS));
   }
-  const result = data.chart.result?.[0];
-  if (!result) throw new Error('Yahoo Finance: empty response');
 
-  const ts = result.timestamp;
-  const q  = result.indicators.quote[0];
-  const candles: Candle[] = [];
+  // Sort chronologically (we fetched backwards)
+  return all.sort((a, b) => a.timestamp - b.timestamp);
+}
 
-  for (let i = 0; i < ts.length; i++) {
-    const o = q.open[i], h = q.high[i], l = q.low[i], c = q.close[i];
-    if (o == null || h == null || l == null || c == null) continue;
-    candles.push({
-      timestamp: ts[i] * 1000,   // Yahoo returns Unix seconds → convert to ms
-      open: o, high: h, low: l, close: c,
-      volume: q.volume[i] ?? 0,
-    });
-  }
-
-  return candles;
+/**
+ * Fetch full daily OHLCV history from CoinGecko /ohlc endpoint.
+ * This gives real open/high/low/close for proper VWAP on the 3d SMA candles.
+ */
+async function fetchCoinGeckoDailyOHLC(): Promise<Candle[]> {
+  const { data } = await axios.get<number[][]>(
+    `${CG_BASE}/coins/solana/ohlc`,
+    {
+      params:  { vs_currency: 'usd', days: 'max' },
+      headers: cgHeaders(),
+      timeout: 20000,
+    },
+  );
+  // Response: [[timestamp_ms, open, high, low, close], ...]
+  return data.map(([ts, o, h, l, c]) => ({
+    timestamp: ts, open: o, high: h, low: l, close: c, volume: 0,
+  }));
 }
 
 /** Aggregate hourly candles into 4h buckets aligned to UTC. */
@@ -168,21 +195,25 @@ async function runBacktest(): Promise<void> {
   console.log(`From     : ${new Date(START_MS).toDateString()}`);
   console.log(`To       : ${new Date().toDateString()}\n`);
 
-  // Fetch historical OHLCV from Yahoo Finance (no geo-restrictions, no API key)
-  process.stdout.write('Fetching 1h candles from Yahoo Finance (2y)... ');
-  const hourlyCandles = await fetchYahooCandles('1h', '2y');
-  // Filter to requested start date, then aggregate to 4h
-  const filteredHourly = hourlyCandles.filter(c => c.timestamp >= START_MS);
-  const candles4h = aggregateTo4h(filteredHourly);
-  console.log(`${hourlyCandles.length} hourly → ${candles4h.length} 4h candles`);
+  if (!CG_API_KEY) {
+    console.log('Tip: set COINGECKO_DEMO_API_KEY env var for faster fetching (free at coingecko.com)\n');
+  }
 
-  process.stdout.write('Fetching daily candles from Yahoo Finance (max)... ');
-  const dailyCandles = await fetchYahooCandles('1d', 'max');
+  // Fetch 4h candles: hourly data paginated backwards in 80-day windows → aggregate to 4h
+  process.stdout.write(`Fetching hourly data from CoinGecko (${new Date(START_MS).getFullYear()}→now) `);
+  const hourlyCandles = await fetchCoinGeckoHourly(START_MS, endMs);
+  const candles4h = aggregateTo4h(hourlyCandles);
+  console.log(` ${hourlyCandles.length} hourly → ${candles4h.length} 4h candles`);
+
+  // Fetch 3d candles: full daily OHLCV history → aggregate to 3d (for SMA3d)
+  process.stdout.write('Fetching daily OHLCV from CoinGecko (max)... ');
+  await new Promise(r => setTimeout(r, CG_DELAY_MS));
+  const dailyCandles = await fetchCoinGeckoDailyOHLC();
   const candles3d = aggregateTo3d(dailyCandles);
   console.log(`${dailyCandles.length} daily → ${candles3d.length} 3d candles\n`);
 
   if (candles4h.length < 20 || candles3d.length < 5) {
-    console.error('Not enough historical data. Check network connectivity to query1.finance.yahoo.com.');
+    console.error('Not enough data. Check connectivity to api.coingecko.com, or try again (rate limit).');
     process.exit(1);
   }
 
