@@ -35,6 +35,9 @@ export interface PositionState {
 
   // Trend bias hysteresis: last confirmed trend so we don't flip on boundary noise
   lastTrendBias: TrendBias;
+
+  // alignToCandle: timestamp (ms) of the last 4h candle the bot executed on
+  lastExecutedCandleTs: number | null;
 }
 
 export interface StrategySignal {
@@ -97,8 +100,11 @@ export interface BotConfig {
       driftThresholdPct: number;
       minTradeUSDC: number;
 
-      // Hysteresis: zone must hold this many consecutive candles before executing
-      zoneConfirmationCandles: number;
+      // Hysteresis: zone must hold this many consecutive candles before executing.
+      // Buys and sells have separate counts — buys default to 1 (immediate) for
+      // faster dip-catching; sells default to 2 for deliberate exits.
+      buyConfirmationCandles: number;
+      sellConfirmationCandles: number;
 
       // Trend adjustment: shifts all zone SOL targets based on SMA trend bias
       trendAdjustment: {

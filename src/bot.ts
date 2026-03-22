@@ -20,6 +20,13 @@ export class TradingBot {
   private lastBootstrapAttemptMs: number = 0;
   private static readonly BOOTSTRAP_RETRY_COOLDOWN_MS = 5 * 60 * 1000; // 5 min between retries
 
+  private static tfToMs(tf: string): number {
+    const map: Record<string, number> = {
+      '1h': 3_600_000, '4h': 14_400_000, '1d': 86_400_000, '3d': 259_200_000,
+    };
+    return map[tf] ?? 14_400_000; // default 4h
+  }
+
   constructor(
     cfg: BotConfig,
     executor: TradeExecutor,
@@ -53,6 +60,19 @@ export class TradingBot {
       console.warn('[Bot] Circuit breaker is active — all trading halted');
       await this.notifier.sendAlert('Circuit breaker active — trading halted');
       return;
+    }
+
+    // ── alignToCandle pre-check ─────────────────────────────────────────────
+    // If enabled, only run the full strategy when a new 4h candle has closed
+    // since the last execution. This prevents redundant ticks seeing identical
+    // indicator data and makes zoneConfirmationCandles mean actual candle closes.
+    if (this.cfg.scheduler.alignToCandle && this.position.lastExecutedCandleTs !== null) {
+      const tfMs = TradingBot.tfToMs(this.cfg.timeframes.executionTf);
+      const nextExpectedMs = this.position.lastExecutedCandleTs + tfMs;
+      if (now < nextExpectedMs) {
+        console.log(`[Bot] alignToCandle — no new ${this.cfg.timeframes.executionTf} candle expected until ${new Date(nextExpectedMs).toISOString()} — skipping`);
+        return;
+      }
     }
 
     // ── 1. Fetch market data ────────────────────────────────────────────────
@@ -163,9 +183,13 @@ export class TradingBot {
     let effectiveAction = signal.action;
 
     // Zone hysteresis: require zone to hold for N consecutive candles before executing.
+    // Buys and sells have separate confirmation counts — buys use 1 (immediate entry
+    // on dip signals) while sells use 2 (deliberate exit requiring a second candle).
     // Applied to rebalance signals only — bootstrap and emergency exits bypass this.
     if (effectiveAction === 'rebalance_buy' || effectiveAction === 'rebalance_sell') {
-      const confirmNeeded = this.cfg.strategy.rebalance.zoneConfirmationCandles;
+      const confirmNeeded = effectiveAction === 'rebalance_buy'
+        ? this.cfg.strategy.rebalance.buyConfirmationCandles
+        : this.cfg.strategy.rebalance.sellConfirmationCandles;
       if (confirmNeeded > 1) {
         const sameZone = signal.zone === this.position.pendingZone;
         const newCount = sameZone ? (this.position.pendingZoneCount ?? 0) + 1 : 1;
@@ -177,10 +201,21 @@ export class TradingBot {
         } else {
           console.log(`[Bot] Zone confirmed — ${signal.zone} (${newCount} candles) → proceeding`);
         }
+      } else {
+        // No confirmation needed — clear any stale pending state
+        this.position = { ...this.position, pendingZone: null, pendingZoneCount: 0 };
       }
     } else if (effectiveAction === 'bootstrap' || effectiveAction === 'emergency_sell') {
       // Reset zone tracking on decisive actions so hysteresis starts fresh afterward
       this.position = { ...this.position, pendingZone: null, pendingZoneCount: 0 };
+    } else if (effectiveAction === 'hold') {
+      // If evaluateStrategy returned hold (small drift, cooldown, etc.) and the zone
+      // differs from what we were tracking, reset the counter. This prevents a stale
+      // count=1 from a previous zone signal firing immediately when that zone reappears.
+      if (this.position.pendingZone !== null && signal.zone !== this.position.pendingZone) {
+        this.position = { ...this.position, pendingZone: null, pendingZoneCount: 0 };
+        console.log(`[Bot] Zone shifted to '${signal.zone}' — resetting confirmation counter`);
+      }
     }
 
     // Oversold recovery gate: after an emergency exit, only allow re-buying when RSI
@@ -285,7 +320,14 @@ export class TradingBot {
         break;
     }
 
-    // ── 10. Persist state ───────────────────────────────────────────────────
+    // ── 10. Record candle timestamp and persist state ────────────────────────
+    // Track which candle we just executed on so alignToCandle can skip redundant ticks.
+    if (this.cfg.scheduler.alignToCandle && candles4h.length > 0) {
+      this.position = {
+        ...this.position,
+        lastExecutedCandleTs: candles4h[candles4h.length - 1].timestamp,
+      };
+    }
     this.logger.saveState('position', this.position);
   }
 

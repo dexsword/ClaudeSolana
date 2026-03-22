@@ -284,6 +284,7 @@ export function buildInitialPosition(): PositionState {
     pendingZoneCount: 0,
     requireOversoldRecovery: false,
     lastTrendBias: 'neutral',
+    lastExecutedCandleTs: null,
   };
 }
 
@@ -308,6 +309,7 @@ export function migratePosition(raw: Record<string, unknown>): PositionState {
       pendingZoneCount: (raw.pendingZoneCount as number) ?? 0,
       requireOversoldRecovery: Boolean(raw.requireOversoldRecovery ?? false),
       lastTrendBias: (raw.lastTrendBias as TrendBias | undefined) ?? 'neutral',
+      lastExecutedCandleTs: (raw.lastExecutedCandleTs as number | null) ?? null,
     };
   }
   // Original tier-based format — full migration
@@ -323,5 +325,6 @@ export function migratePosition(raw: Record<string, unknown>): PositionState {
     pendingZoneCount: 0,
     requireOversoldRecovery: false,
     lastTrendBias: 'neutral',
+    lastExecutedCandleTs: null,
   };
 }

@@ -16,7 +16,8 @@
       "driftThresholdPct": 7,
       "minTradeUSDC": 3,
 
-      "zoneConfirmationCandles": 2,
+      "buyConfirmationCandles": 1,
+      "sellConfirmationCandles": 2,
 
       "trendAdjustment": {
         "bullishSolBoostPct": 10,

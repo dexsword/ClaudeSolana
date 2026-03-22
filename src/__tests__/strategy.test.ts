@@ -13,7 +13,8 @@ function makeCfg(overrides: Partial<BotConfig['strategy']> = {}): BotConfig {
         bootstrapRsiThreshold: 62,
         driftThresholdPct: 7,
         minTradeUSDC: 3,
-        zoneConfirmationCandles: 1, // disable hysteresis in unit tests (tested in bot.ts)
+        buyConfirmationCandles: 1,  // disable hysteresis in unit tests (tested in bot.ts)
+        sellConfirmationCandles: 1,
         trendAdjustment: { bullishSolBoostPct: 10, bearishSolCutPct: 12 },
         strongBuyRsi: 28,
         strongBuyVwapPct: 4,
@@ -74,6 +75,7 @@ const bootstrapped: PositionState = {
   pendingZoneCount: 0,
   requireOversoldRecovery: false,
   lastTrendBias: 'neutral',
+  lastExecutedCandleTs: null,
 };
 
 // ── determineTrendBias ────────────────────────────────────────────────────────
