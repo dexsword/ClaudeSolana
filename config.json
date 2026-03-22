@@ -13,7 +13,7 @@
     },
     "rebalance": {
       "bootstrapRsiThreshold": 62,
-      "driftThresholdPct": 7,
+      "driftThresholdPct": 9,
       "minTradeUSDC": 3,
 
       "buyConfirmationCandles": 1,
@@ -21,31 +21,31 @@
 
       "trendAdjustment": {
         "bullishSolBoostPct": 10,
-        "bearishSolCutPct": 12
+        "bearishSolCutPct": 15
       },
 
       "strongBuyRsi": 28,
       "strongBuyVwapPct": 4,
       "strongBuyTargetSolPct": 75,
 
-      "moderateBuyRsi": 40,
+      "moderateBuyRsi": 37,
       "moderateBuyVwapPct": 2,
       "moderateBuyTargetSolPct": 62,
 
       "neutralTargetSolPct": 50,
 
-      "moderateSellRsi": 62,
+      "moderateSellRsi": 65,
       "moderateSellVwapFloorPct": 1,
       "moderateSellTargetSolPct": 38,
 
-      "strongSellRsi": 72,
+      "strongSellRsi": 70,
       "strongSellVwapPct": 2,
       "strongSellTargetSolPct": 25
     },
     "risk": {
       "stopLossPct": 13,
-      "trailingStopActivationPct": 10,
-      "trailingStopPct": 7,
+      "trailingStopActivationPct": 13,
+      "trailingStopPct": 9,
       "circuitBreakerDrawdownPct": 30,
       "maxSlippagePct": 2
     },
@@ -73,7 +73,7 @@
     "botToken": ""
   },
   "scheduler": {
-    "cronExpression": "0 * * * *",
+    "cronExpression": "0 */2 * * *",
     "alignToCandle": true
   }
 }
