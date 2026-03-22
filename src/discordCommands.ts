@@ -68,6 +68,9 @@ export class DiscordCommands {
         case 'pnl':
           await msg.reply(this.buildPnl());
           break;
+        case 'avg':
+          await msg.reply(this.buildAvg());
+          break;
         case 'help':
         case undefined:
           await msg.reply(this.buildHelp());
@@ -154,10 +157,11 @@ export class DiscordCommands {
     const lines = trades.map((t) => {
       const emoji = t.side === 'buy' ? '🟢' : '🔴';
       const zone = t.zone ? ` [${t.zone}]` : '';
+      const avgEntry = t.avgEntryAtSell != null ? ` avg@$${t.avgEntryAtSell.toFixed(2)}` : '';
       const pnl = t.pnl !== null ? ` | P&L: ${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}` : '';
       const dry = t.dryRun ? ' *(dry)*' : '';
       const date = new Date(t.timestamp).toISOString().slice(0, 16).replace('T', ' ');
-      return `${emoji} \`${date}\` **${t.action.toUpperCase()}${zone}**${dry} @ $${t.price.toFixed(4)} · ${t.solAmount.toFixed(3)} SOL${pnl}`;
+      return `${emoji} \`${date}\` **${t.action.toUpperCase()}${zone}**${dry} @ $${t.price.toFixed(4)} · ${t.solAmount.toFixed(3)} SOL${avgEntry}${pnl}`;
     });
 
     return `📋 **Last ${trades.length} Trade(s)**\n${lines.join('\n')}`;
@@ -193,6 +197,29 @@ export class DiscordCommands {
     ].join('\n');
   }
 
+  private buildAvg(): string {
+    const pos = this.logger.loadState<PositionState>('position');
+    if (!pos?.bootstrapDone || pos.averageEntryPrice <= 0) {
+      return '📊 **Avg Entry**\nNo active position.';
+    }
+    const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number; totalValueUSDC: number }>('balances');
+    const impliedPrice = bal && bal.solBalance > 0
+      ? (bal.totalValueUSDC - bal.usdcBalance) / bal.solBalance
+      : null;
+    const unrealLine = impliedPrice != null
+      ? (() => {
+          const pct = (impliedPrice - pos.averageEntryPrice) / pos.averageEntryPrice * 100;
+          const usdcGain = (impliedPrice - pos.averageEntryPrice) * pos.solBalance;
+          return `\nUnrealized: ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% (${usdcGain >= 0 ? '+' : ''}$${usdcGain.toFixed(2)}) vs last tick $${impliedPrice.toFixed(4)}`;
+        })()
+      : '';
+    return [
+      '📊 **Avg Entry**',
+      `Avg entry: $${pos.averageEntryPrice.toFixed(4)}`,
+      `Holding: ${pos.solBalance.toFixed(4)} SOL${unrealLine}`,
+    ].join('\n');
+  }
+
   private buildPnl(): string {
     const total = this.logger.getTotalPnl();
     const emoji = total >= 0 ? '📈' : '📉';
@@ -207,6 +234,7 @@ export class DiscordCommands {
       '`!solbot position` — SOL allocation, avg entry, trailing stop',
       '`!solbot last` — last signal (zone, RSI, VWAP, reason)',
       '`!solbot trades [n]` — last N trades (default 5, max 20)',
+      '`!solbot avg` — current avg entry price + unrealized P&L',
       '`!solbot pnl` — total realized P&L',
       '`!solbot help` — this message',
     ].join('\n');

@@ -22,7 +22,11 @@ export class Notifier {
     const emoji = trade.side === 'buy' ? '🟢' : '🔴';
     const mode = dryRun ? '[DRY RUN] ' : '';
     const zone = trade.zone ? ` [${trade.zone}]` : '';
-    const pnl = trade.pnl !== null ? `\nP&L: ${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}` : '';
+    const pnlLine = trade.pnl !== null
+      ? trade.avgEntryAtSell != null
+        ? `\nAvg Entry: $${trade.avgEntryAtSell.toFixed(4)} | P&L: ${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}`
+        : `\nP&L: ${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}`
+      : '';
 
     const message = [
       `${emoji} ${mode}**${trade.action.toUpperCase()}${zone}**`,
@@ -30,14 +34,14 @@ export class Notifier {
       `SOL: ${trade.solAmount.toFixed(4)} | USDC: $${trade.usdcAmount.toFixed(2)}`,
       `RSI: ${trade.rsi?.toFixed(1) ?? 'N/A'} | VWAP: $${trade.vwap?.toFixed(4) ?? 'N/A'}`,
       `Trend: ${trade.trendBias}`,
-      `Reason: ${trade.reason}${pnl}`,
+      `Reason: ${trade.reason}${pnlLine}`,
       trade.txSignature ? `TX: \`${trade.txSignature}\`` : '',
     ].filter(Boolean).join('\n');
 
     await this.send(message);
   }
 
-  async sendSignalNotification(signal: StrategySignal): Promise<void> {
+  async sendSignalNotification(signal: StrategySignal, avgEntry: number | null = null): Promise<void> {
     if (!this.cfg.enabled) return;
 
     const actionEmoji: Record<string, string> = {
@@ -53,13 +57,20 @@ export class Notifier {
     const vwapDev = signal.rsi4h !== null && signal.vwap4h !== null
       ? ` | VWAP dev: ${(((signal.price - signal.vwap4h) / signal.vwap4h) * 100).toFixed(1)}%`
       : '';
+    const avgEntryLine = avgEntry != null && avgEntry > 0
+      ? (() => {
+          const pct = (signal.price - avgEntry) / avgEntry * 100;
+          return `Avg Entry: $${avgEntry.toFixed(4)} | Unrealized: ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+        })()
+      : '';
 
     const message = [
       `${emoji} **${signal.action.toUpperCase()}** — Zone: ${signal.zone} [${signal.trendBias}]`,
       `Price: $${signal.price.toFixed(4)} | RSI: ${rsi}${vwapDev}`,
+      avgEntryLine,
       `Target: ${signal.targetSolPct}% SOL`,
       `Reason: ${signal.reason}`,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     await this.send(message);
   }

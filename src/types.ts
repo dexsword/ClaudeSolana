@@ -67,6 +67,7 @@ export interface TradeRecord {
   sma: number | null;
   trendBias: string;
   pnl: number | null;
+  avgEntryAtSell: number | null;  // averageEntryPrice at moment of sell; null for buys
 }
 
 export interface SwapResult {

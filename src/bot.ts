@@ -213,7 +213,10 @@ export class TradingBot {
       executed: effectiveAction !== 'hold',
     });
 
-    await this.notifier.sendSignalNotification({ ...signal, action: effectiveAction });
+    await this.notifier.sendSignalNotification(
+      { ...signal, action: effectiveAction },
+      this.position.bootstrapDone ? this.position.averageEntryPrice : null,
+    );
 
     // ── 9. Execute signal ───────────────────────────────────────────────────
     switch (effectiveAction) {
@@ -343,6 +346,7 @@ export class TradingBot {
       sma: signal.sma3d,
       trendBias: signal.trendBias,
       pnl: null,
+      avgEntryAtSell: null,
     };
 
     this.logger.logTrade(trade);
@@ -435,6 +439,7 @@ export class TradingBot {
       sma: signal.sma3d,
       trendBias: signal.trendBias,
       pnl,
+      avgEntryAtSell: this.position.averageEntryPrice,
     };
 
     this.logger.logTrade(trade);

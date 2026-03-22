@@ -32,8 +32,9 @@ export class TradeLogger {
         vwap          REAL,
         sma           REAL,
         trend_bias    TEXT,
-        pnl           REAL,
-        created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+        pnl                REAL,
+        avg_entry_at_sell  REAL,
+        created_at         TEXT    NOT NULL DEFAULT (datetime('now'))
       );
 
       CREATE TABLE IF NOT EXISTS signals (
@@ -66,16 +67,22 @@ export class TradeLogger {
     } catch {
       // Column already exists — ignore
     }
+    // Add avg_entry_at_sell column (migration for existing installs)
+    try {
+      this.db.exec(`ALTER TABLE trades ADD COLUMN avg_entry_at_sell REAL`);
+    } catch {
+      // Column already exists — ignore
+    }
   }
 
   logTrade(record: TradeRecord): number {
     const stmt = this.db.prepare(`
       INSERT INTO trades
         (timestamp, action, side, sol_amount, usdc_amount, price, zone,
-         tx_signature, dry_run, reason, rsi, vwap, sma, trend_bias, pnl)
+         tx_signature, dry_run, reason, rsi, vwap, sma, trend_bias, pnl, avg_entry_at_sell)
       VALUES
         (@timestamp, @action, @side, @sol_amount, @usdc_amount, @price, @zone,
-         @tx_signature, @dry_run, @reason, @rsi, @vwap, @sma, @trend_bias, @pnl)
+         @tx_signature, @dry_run, @reason, @rsi, @vwap, @sma, @trend_bias, @pnl, @avg_entry_at_sell)
     `);
 
     const result = stmt.run({
@@ -94,6 +101,7 @@ export class TradeLogger {
       sma: record.sma ?? null,
       trend_bias: record.trendBias,
       pnl: record.pnl ?? null,
+      avg_entry_at_sell: record.avgEntryAtSell ?? null,
     });
 
     return result.lastInsertRowid as number;
@@ -162,6 +170,7 @@ export class TradeLogger {
       sma: r.sma as number | null,
       trendBias: r.trend_bias as string,
       pnl: r.pnl as number | null,
+      avgEntryAtSell: (r.avg_entry_at_sell ?? null) as number | null,
     }));
   }
 
