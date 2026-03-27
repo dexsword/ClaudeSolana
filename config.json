@@ -13,7 +13,7 @@
     },
     "rebalance": {
       "bootstrapRsiThreshold": 62,
-      "driftThresholdPct": 9,
+      "driftThresholdPct": 7,
       "minTradeUSDC": 3,
 
       "buyConfirmationCandles": 1,
@@ -34,18 +34,18 @@
 
       "neutralTargetSolPct": 50,
 
-      "moderateSellRsi": 65,
+      "moderateSellRsi": 62,
       "moderateSellVwapFloorPct": 1,
       "moderateSellTargetSolPct": 38,
 
-      "strongSellRsi": 70,
+      "strongSellRsi": 73,
       "strongSellVwapPct": 2,
       "strongSellTargetSolPct": 25
     },
     "risk": {
       "stopLossPct": 13,
-      "trailingStopActivationPct": 13,
-      "trailingStopPct": 9,
+      "trailingStopActivationPct": 10,
+      "trailingStopPct": 10,
       "circuitBreakerDrawdownPct": 30,
       "maxSlippagePct": 2
     },
@@ -55,9 +55,9 @@
     },
     "regime": {
       "bearTargetMultiplier": 0.80,
-      "bearDriftOverridePct": 6,
+      "bearDriftOverridePct": 5,
       "bearModerateBuyRsiAdjustment": -4,
-      "bearExtraVwapDiscountPct": 1.5
+      "bearExtraVwapDiscountPct": 2
     }
   },
   "capital": {
