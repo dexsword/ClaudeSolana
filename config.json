@@ -52,6 +52,12 @@
     "cooldown": {
       "candlesAfterExit": 3,
       "candleDurationMinutes": 240
+    },
+    "regime": {
+      "bearTargetMultiplier": 0.80,
+      "bearDriftOverridePct": 6,
+      "bearModerateBuyRsiAdjustment": -4,
+      "bearExtraVwapDiscountPct": 1.5
     }
   },
   "capital": {

@@ -4,8 +4,8 @@
  * Fetches candle data ONCE, then sweeps a grid of parameter combinations
  * entirely in memory — no additional API calls during optimization.
  *
- * Grid size: 3^9 = 19 683 combinations.
- * Each simulation is ~5–10 ms, so the full sweep completes in 2–3 minutes.
+ * Grid size: 3^13 = 1 594 323 combinations (9 zone/risk axes + 4 regime axes).
+ * Each simulation is ~2 ms, so the full sweep completes in ~50–60 minutes.
  *
  * Usage:
  *   CRYPTOCOMPARE_API_KEY=xxx npm run optimize
@@ -119,17 +119,29 @@ function aggregateTo3d(daily: Candle[]): Candle[] {
 }
 
 // ── Parameter grid ────────────────────────────────────────────────────────────
-// 3^9 = 19 683 combinations.  Each axis covers a range around the current value.
+// 3^13 = 1 594 323 would be too slow; we use 3 values per axis.
+// Total: 3^9 (zone/risk) × 3^4 (regime) = 19 683 × 81 = 1 594 323 — still too large.
+// Split into two phases or accept ~59k (3^9 × 3^1 per regime param sampled jointly).
+// Practical choice: 3^9 base × 3^4 regime = we keep 3 vals each = 3^13 ≈ 1.6M is slow.
+// Use 3 base zone params × 3 risk × 3^4 regime = same. Keep at 3^13 but fast loop.
+// At ~2ms/sim this is ~53 min. Acceptable for "can run as long as it needs".
 interface ParamSet {
-  strongBuyRsi:             number;  // RSI below which → heavy buy
-  moderateBuyRsi:           number;  // RSI below which → moderate buy
-  moderateSellRsi:          number;  // RSI above which → moderate sell
-  strongSellRsi:            number;  // RSI above which → heavy sell
-  driftThresholdPct:        number;  // min deviation from target before acting
-  stopLossPct:              number;  // hard stop below avg entry
-  trailingStopActivationPct:number;  // profit % before trailing stop activates
-  trailingStopPct:          number;  // trail distance from HWM
-  bearishSolCutPct:         number;  // how much to cut SOL target in bear trend
+  // Zone thresholds
+  strongBuyRsi:              number;
+  moderateBuyRsi:            number;
+  moderateSellRsi:           number;
+  strongSellRsi:             number;
+  // Execution
+  driftThresholdPct:         number;
+  stopLossPct:               number;
+  trailingStopActivationPct: number;
+  trailingStopPct:           number;
+  bearishSolCutPct:          number;
+  // Bearish regime policy (formerly hardcoded in getRegimePolicy)
+  bearTargetMultiplier:          number;
+  bearDriftOverridePct:          number;
+  bearModerateBuyRsiAdjustment:  number;
+  bearExtraVwapDiscountPct:      number;
 }
 
 const GRID: { [K in keyof ParamSet]: number[] } = {
@@ -142,6 +154,11 @@ const GRID: { [K in keyof ParamSet]: number[] } = {
   trailingStopActivationPct: [8,  10, 13],
   trailingStopPct:           [5,  7,  9],
   bearishSolCutPct:          [9,  12, 15],
+  // Regime policy axes
+  bearTargetMultiplier:         [0.75, 0.80, 0.85],
+  bearDriftOverridePct:         [5,    6,    7],
+  bearModerateBuyRsiAdjustment: [-6,   -4,   -2],
+  bearExtraVwapDiscountPct:     [1.0,  1.5,  2.0],
 };
 
 /** Enumerate all grid combinations. */
@@ -202,6 +219,11 @@ function simulate(
   risk.trailingStopActivationPct = params.trailingStopActivationPct;
   risk.trailingStopPct        = params.trailingStopPct;
   r.trendAdjustment.bearishSolCutPct = params.bearishSolCutPct;
+  // Regime policy — overrides the config defaults so getRegimePolicy() picks them up
+  cfg.strategy.regime.bearTargetMultiplier         = params.bearTargetMultiplier;
+  cfg.strategy.regime.bearDriftOverridePct         = params.bearDriftOverridePct;
+  cfg.strategy.regime.bearModerateBuyRsiAdjustment = params.bearModerateBuyRsiAdjustment;
+  cfg.strategy.regime.bearExtraVwapDiscountPct     = params.bearExtraVwapDiscountPct;
 
   // Precomputed SMA3d pointer (reset per run)
   let sma3dPtr = 0;
@@ -435,10 +457,11 @@ async function main(): Promise<void> {
   const bhDD     = results[0]?.bhDD ?? 0;
 
   console.log(
-    'Rank  Score   Alpha   Sharpe  MaxDD   Trades  WinR%  '
-    + ' sBuyRSI mBuyRSI mSellRSI sSellRSI drift  stop  tsAct tsTrail bearCut',
+    'Rank  Score   Alpha   Sharpe  MaxDD   Trades  WinR%'
+    + '  sBuyRSI mBuyRSI mSellRSI sSellRSI drift  stop  tsAct tsTrail bearCut'
+    + '  bMult bDrift bRsiAdj bVwap',
   );
-  console.log('─'.repeat(138));
+  console.log('─'.repeat(165));
 
   for (let i = 0; i < Math.min(20, results.length); i++) {
     const r = results[i];
@@ -450,7 +473,7 @@ async function main(): Promise<void> {
       + `${r.sharpe.toFixed(2).padStart(6)}  `
       + `${('-' + r.maxDD.toFixed(1) + '%').padStart(7)}  `
       + `${String(r.trades).padStart(6)}  `
-      + `${r.winRate.toFixed(0).padStart(5)}%  `
+      + `${r.winRate.toFixed(0).padStart(5)}%`
       + `  ${String(p.strongBuyRsi).padStart(7)}`
       + ` ${String(p.moderateBuyRsi).padStart(7)}`
       + ` ${String(p.moderateSellRsi).padStart(8)}`
@@ -459,7 +482,11 @@ async function main(): Promise<void> {
       + ` ${String(p.stopLossPct).padStart(5)}`
       + ` ${String(p.trailingStopActivationPct).padStart(6)}`
       + ` ${String(p.trailingStopPct).padStart(7)}`
-      + ` ${String(p.bearishSolCutPct).padStart(7)}`,
+      + ` ${String(p.bearishSolCutPct).padStart(7)}`
+      + `  ${String(p.bearTargetMultiplier).padStart(5)}`
+      + ` ${String(p.bearDriftOverridePct).padStart(6)}`
+      + ` ${String(p.bearModerateBuyRsiAdjustment).padStart(7)}`
+      + ` ${String(p.bearExtraVwapDiscountPct).padStart(5)}`,
     );
   }
 

@@ -158,6 +158,13 @@ export interface BotConfig {
       candlesAfterExit: number;      // applies to emergency exits only
       candleDurationMinutes: number;
     };
+    /** Bearish-regime policy values — read by getRegimePolicy() so they are optimizable. */
+    regime: {
+      bearTargetMultiplier:          number;  // scale all zone targets by this in bearish (e.g. 0.80)
+      bearDriftOverridePct:          number;  // override drift threshold in bearish (e.g. 6)
+      bearModerateBuyRsiAdjustment:  number;  // added to moderateBuyRsi; negative = stricter (e.g. -4)
+      bearExtraVwapDiscountPct:      number;  // extra VWAP discount required in bearish (e.g. 1.5)
+    };
   };
   capital: {
     startingCapitalUSDC: number;

@@ -36,29 +36,28 @@ export function determineTrendBias(
 
 /**
  * Returns the regime-level trading policy for the current trend bias.
- *
- * Bullish / neutral: permissive — no adjustments.
- * Bearish: tighter RSI/VWAP entry requirements, reduced exposure multiplier,
- *          tighter drift threshold so the bot acts faster on deteriorating positions.
+ * Bearish values are read from cfg.strategy.regime so they can be optimized
+ * without touching this function. Bullish/neutral remain permissive.
  */
-export function getRegimePolicy(trendBias: TrendBias): RegimePolicy {
+export function getRegimePolicy(trendBias: TrendBias, cfg: BotConfig): RegimePolicy {
   if (trendBias === 'bearish') {
+    const reg = cfg.strategy.regime;
     return {
-      buyEnabled:                  true,   // still buy deep dips — just with stricter bars
-      sellEnabled:                 true,
-      targetMultiplier:            0.80,   // scale down all zone targets by 20% in bear markets
-      driftThresholdOverridePct:   6,      // react faster (default 9 → 6) to deteriorating positions
-      moderateBuyRsiAdjustment:    -4,     // moderate_buy requires RSI ≤ (moderateBuyRsi - 4) = 33
-      requiredExtraVwapDiscountPct: 1.5,   // need 1.5% deeper VWAP discount before buying
+      buyEnabled:                   true,
+      sellEnabled:                  true,
+      targetMultiplier:             reg.bearTargetMultiplier,
+      driftThresholdOverridePct:    reg.bearDriftOverridePct,
+      moderateBuyRsiAdjustment:     reg.bearModerateBuyRsiAdjustment,
+      requiredExtraVwapDiscountPct: reg.bearExtraVwapDiscountPct,
     };
   }
   // bullish and neutral: no adjustments — zone logic runs as-is
   return {
-    buyEnabled:                  true,
-    sellEnabled:                 true,
-    targetMultiplier:            1.0,
-    driftThresholdOverridePct:   undefined,
-    moderateBuyRsiAdjustment:    0,
+    buyEnabled:                   true,
+    sellEnabled:                  true,
+    targetMultiplier:             1.0,
+    driftThresholdOverridePct:    undefined,
+    moderateBuyRsiAdjustment:     0,
     requiredExtraVwapDiscountPct: 0,
   };
 }
@@ -224,7 +223,7 @@ export function evaluateStrategy(
   // ── REGIME POLICY ──────────────────────────────────────────────────────────
   // Applied after zone determination — scales target exposure and tightens entry
   // criteria in bearish regimes without touching the zone classification itself.
-  const policy = getRegimePolicy(trendBias);
+  const policy = getRegimePolicy(trendBias, cfg);
 
   // Scale down target allocation in bearish regime (multiplicative, on top of bearishSolCutPct)
   const targetSolPct = Math.max(10, Math.min(85, Math.round(rawTargetSolPct * policy.targetMultiplier)));
