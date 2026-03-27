@@ -28,12 +28,22 @@ import { evaluateStrategy, updateTrailingStop, buildInitialPosition } from './st
 import { calculateRSI, calculateVWAP, calculateSMA } from './indicators';
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
-const args     = process.argv.slice(2);
-const fromArg  = args.find(a => a.startsWith('--from='))?.split('=')[1];
-const splitArg = args.find(a => a.startsWith('--split='))?.split('=')[1];
-const START_MS = fromArg  ? new Date(fromArg).getTime()  : new Date('2022-03-01').getTime();
-const SPLIT_MS = splitArg ? new Date(splitArg).getTime() : new Date('2025-01-01').getTime();
-const CC_KEY   = process.env.CRYPTOCOMPARE_API_KEY ?? '';
+const args      = process.argv.slice(2);
+const fromArg   = args.find(a => a.startsWith('--from='))?.split('=')[1];
+const splitArg  = args.find(a => a.startsWith('--split='))?.split('=')[1];
+const randomArg = args.find(a => a.startsWith('--random='))?.split('=')[1];
+const maxArg    = args.find(a => a.startsWith('--max='))?.split('=')[1];
+const topArg    = args.find(a => a.startsWith('--top='))?.split('=')[1];
+const fastMode  = args.includes('--fast');
+const resumeMode = args.includes('--resume');
+
+const START_MS  = fromArg  ? new Date(fromArg).getTime()  : new Date('2022-03-01').getTime();
+const SPLIT_MS  = splitArg ? new Date(splitArg).getTime() : new Date('2025-01-01').getTime();
+const RANDOM_N  = randomArg ? parseInt(randomArg, 10) : null;  // null = exhaustive grid
+const MAX_COMBOS = maxArg  ? parseInt(maxArg, 10)   : null;  // cap grid sweep at N
+const TOP_K_SIZE = topArg  ? parseInt(topArg, 10)   : 50;   // keep only top-N in memory
+
+const CC_KEY    = process.env.CRYPTOCOMPARE_API_KEY ?? '';
 if (!CC_KEY) {
   console.error('ERROR: CRYPTOCOMPARE_API_KEY is not set.');
   process.exit(1);
@@ -168,13 +178,33 @@ const GRID: { [K in keyof ParamSet]: number[] } = {
   bearExtraVwapDiscountPct:     [1.0,  1.5,  2.0],
 };
 
-/** Enumerate all grid combinations. */
-function* gridCombinations(): Generator<ParamSet> {
-  const keys = Object.keys(GRID) as (keyof ParamSet)[];
-  const vals  = keys.map(k => GRID[k]);
+// Fast mode: 2 values per axis → 2^13 = 8 192 combos for quick exploration
+const FAST_GRID: { [K in keyof ParamSet]: number[] } = {
+  strongBuyRsi:              [25, 31],
+  moderateBuyRsi:            [37, 43],
+  moderateSellRsi:           [58, 65],
+  strongSellRsi:             [70, 76],
+  driftThresholdPct:         [5,  9],
+  stopLossPct:               [10, 16],
+  trailingStopActivationPct: [8,  13],
+  trailingStopPct:           [5,  9],
+  bearishSolCutPct:          [9,  15],
+  bearTargetMultiplier:         [0.75, 0.85],
+  bearDriftOverridePct:         [5,    7],
+  bearModerateBuyRsiAdjustment: [-6,   -2],
+  bearExtraVwapDiscountPct:     [1.0,  2.0],
+};
+
+const ACTIVE_GRID = fastMode ? FAST_GRID : GRID;
+
+/** Exhaustive grid: enumerate all combinations in deterministic order.
+ *  startAt allows resuming from a checkpoint without re-scanning. */
+function* gridCombinations(startAt = 0): Generator<ParamSet> {
+  const keys  = Object.keys(ACTIVE_GRID) as (keyof ParamSet)[];
+  const vals  = keys.map(k => ACTIVE_GRID[k]);
   const total = vals.reduce((a, v) => a * v.length, 1);
 
-  for (let idx = 0; idx < total; idx++) {
+  for (let idx = startAt; idx < total; idx++) {
     const combo: Partial<ParamSet> = {};
     let rem = idx;
     for (let d = keys.length - 1; d >= 0; d--) {
@@ -183,6 +213,74 @@ function* gridCombinations(): Generator<ParamSet> {
     }
     yield combo as ParamSet;
   }
+}
+
+/** Random search: sample N combos from the active grid.
+ *  startAt resumes after a checkpoint (generates new random samples, not repeats). */
+function* randomCombinations(n: number, startAt = 0): Generator<ParamSet> {
+  const keys = Object.keys(ACTIVE_GRID) as (keyof ParamSet)[];
+  for (let i = startAt; i < n; i++) {
+    const combo: Partial<ParamSet> = {};
+    for (const k of keys) {
+      const vals = ACTIVE_GRID[k];
+      combo[k] = vals[Math.floor(Math.random() * vals.length)];
+    }
+    yield combo as ParamSet;
+  }
+}
+
+// ── Top-K: fixed-size sorted buffer (replaces growing results array) ──────────
+class TopK {
+  private items: SimResult[] = [];
+  constructor(private readonly k: number) {}
+
+  add(r: SimResult): void {
+    if (this.items.length < this.k) {
+      this.items.push(r);
+      this.items.sort((a, b) => b.score - a.score);
+    } else if (r.score > this.items[this.items.length - 1].score) {
+      this.items[this.items.length - 1] = r;
+      // insertion-sort from bottom: faster than full re-sort for k<=100
+      for (let i = this.items.length - 1; i > 0 && this.items[i].score > this.items[i - 1].score; i--) {
+        [this.items[i], this.items[i - 1]] = [this.items[i - 1], this.items[i]];
+      }
+    }
+  }
+
+  get minScore(): number {
+    return this.items.length < this.k ? -Infinity : this.items[this.items.length - 1].score;
+  }
+  get best(): SimResult | undefined { return this.items[0]; }
+  get all(): SimResult[] { return this.items; }
+  restore(items: SimResult[]): void { this.items = items.slice(0, this.k); }
+}
+
+// ── Checkpoint ────────────────────────────────────────────────────────────────
+const CHECKPOINT_FILE  = path.join(__dirname, '../optimize_checkpoint.json');
+const CHECKPOINT_EVERY = 5_000;
+const REPORT_EVERY     = 1_000;
+
+interface Checkpoint {
+  version:     number;
+  mode:        'grid' | 'random';
+  fast:        boolean;
+  startMs:     number;
+  splitMs:     number;
+  totalCombos: number;
+  doneCount:   number;
+  topResults:  SimResult[];
+  savedAt:     number;
+}
+
+function saveCheckpoint(cp: Checkpoint): void {
+  fs.writeFileSync(CHECKPOINT_FILE, JSON.stringify(cp));
+}
+
+function loadCheckpoint(): Checkpoint | null {
+  try {
+    if (!fs.existsSync(CHECKPOINT_FILE)) return null;
+    return JSON.parse(fs.readFileSync(CHECKPOINT_FILE, 'utf-8')) as Checkpoint;
+  } catch { return null; }
 }
 
 // ── Simulation result ─────────────────────────────────────────────────────────
@@ -421,16 +519,37 @@ function score(m: PeriodMetrics): number {
 async function main(): Promise<void> {
   const endMs = Date.now();
 
+  // Determine search mode
+  const mode: 'grid' | 'random' = RANDOM_N !== null ? 'random' : 'grid';
+  const gridKeys = Object.keys(ACTIVE_GRID) as (keyof ParamSet)[];
+  const fullGridSize = gridKeys.reduce((a, k) => a * ACTIVE_GRID[k].length, 1);
+  const totalCombos = mode === 'random'
+    ? RANDOM_N!
+    : (MAX_COMBOS !== null ? Math.min(MAX_COMBOS, fullGridSize) : fullGridSize);
+
   console.log('╔═══════════════════════════════════════════════════════╗');
   console.log('║         SOL Swing Bot — Parameter Optimizer           ║');
   console.log('╚═══════════════════════════════════════════════════════╝\n');
-
-  const gridKeys    = Object.keys(GRID) as (keyof ParamSet)[];
-  const totalCombos = gridKeys.reduce((a, k) => a * GRID[k].length, 1);
+  console.log(`Mode      : ${mode === 'random' ? `random search (${totalCombos.toLocaleString()} samples)` : `grid (${fastMode ? 'fast' : 'full'}, ${totalCombos.toLocaleString()} combos)`}`);
+  console.log(`Top-K     : keep top ${TOP_K_SIZE} in memory`);
   console.log(`In-sample : ${new Date(START_MS).toDateString()} → ${new Date(SPLIT_MS).toDateString()}`);
   console.log(`Validation: ${new Date(SPLIT_MS).toDateString()} → ${new Date(endMs).toDateString()}`);
-  console.log(`Grid      : ${gridKeys.map(k => `${k}[${GRID[k].length}]`).join(', ')}`);
-  console.log(`Combos    : ${totalCombos.toLocaleString()}\n`);
+  console.log(`Resume    : ${resumeMode ? 'yes (loading checkpoint)' : 'no'}\n`);
+
+  // ── Load checkpoint if resuming ──────────────────────────────────────────────
+  let resumeFrom = 0;
+  const topK = new TopK(TOP_K_SIZE);
+
+  if (resumeMode) {
+    const cp = loadCheckpoint();
+    if (cp && cp.startMs === START_MS && cp.splitMs === SPLIT_MS && cp.mode === mode && cp.fast === fastMode) {
+      resumeFrom = cp.doneCount;
+      topK.restore(cp.topResults);
+      console.log(`Resuming from checkpoint: ${resumeFrom.toLocaleString()} sims done, top score ${topK.best?.score.toFixed(1) ?? '—'}\n`);
+    } else {
+      console.log('Checkpoint not compatible with current settings — starting fresh.\n');
+    }
+  }
 
   // ── Fetch full dataset once ──────────────────────────────────────────────────
   process.stdout.write('Fetching hourly OHLCV ');
@@ -455,98 +574,107 @@ async function main(): Promise<void> {
   const smaSeries3d  = calculateSMA(candles3d, smaPeriod);
 
   // ── Locate split and boundary indices ───────────────────────────────────────
-  const warmup = rsiPeriod + 2;
-  // First 4h candle at or after SPLIT_MS
+  const warmup     = rsiPeriod + 2;
   const splitIdx4h = candles4h.findIndex(c => c.timestamp >= SPLIT_MS);
-  if (splitIdx4h < warmup + 1) {
-    console.error('Split date is too early — not enough in-sample candles for warm-up.'); process.exit(1);
-  }
-  if (splitIdx4h >= candles4h.length - 1) {
-    console.error('Split date is too late — no out-of-sample candles remain.'); process.exit(1);
-  }
+  if (splitIdx4h < warmup + 1) { console.error('Split date too early.'); process.exit(1); }
+  if (splitIdx4h >= candles4h.length - 1) { console.error('Split date too late.'); process.exit(1); }
 
   const inSampleStart  = warmup;
-  const inSampleEnd    = splitIdx4h;       // exclusive
-  const outSampleStart = splitIdx4h;       // inclusive; indicators already warmed up
-  const outSampleEnd   = candles4h.length; // exclusive
+  const inSampleEnd    = splitIdx4h;
+  const outSampleStart = splitIdx4h;
+  const outSampleEnd   = candles4h.length;
 
-  console.log(`In-sample candles  : ${inSampleEnd - inSampleStart}`);
-  console.log(`Out-of-sample candles: ${outSampleEnd - outSampleStart}\n`);
+  console.log(`In-sample candles    : ${(inSampleEnd - inSampleStart).toLocaleString()}`);
+  console.log(`Out-of-sample candles: ${(outSampleEnd - outSampleStart).toLocaleString()}\n`);
 
-  // ── Phase 1: grid sweep on in-sample ────────────────────────────────────────
-  console.log(`Running ${totalCombos.toLocaleString()} in-sample simulations...`);
-  const results: SimResult[] = [];
-  let done = 0;
-  const reportEvery = Math.max(1, Math.floor(totalCombos / 20));
+  // ── Phase 1: sweep on in-sample ──────────────────────────────────────────────
+  const remaining = totalCombos - resumeFrom;
+  console.log(`Running ${remaining.toLocaleString()} in-sample simulations (${resumeFrom > 0 ? `resuming at ${resumeFrom.toLocaleString()}` : 'fresh start'})...`);
 
-  for (const params of gridCombinations()) {
+  let done        = resumeFrom;
+  const sweepStart = Date.now() - resumeFrom * 2;  // rough elapsed offset for ETA
+
+  const combos = mode === 'random'
+    ? randomCombinations(totalCombos, resumeFrom)
+    : gridCombinations(resumeFrom);
+
+  for (const params of combos) {
+    if (MAX_COMBOS !== null && done >= MAX_COMBOS) break;
+
     const m = simulate(params, candles4h, candles3d, rsiSeries4h, vwapSeries4h, smaSeries3d, rsiPeriod, inSampleStart, inSampleEnd);
-    results.push({ params, inSample: m, outSample: null, score: score(m) });
+    topK.add({ params, inSample: m, outSample: null, score: score(m) });
     done++;
-    if (done % reportEvery === 0) {
-      process.stdout.write(`  ${Math.round(done / totalCombos * 100)}% (${done.toLocaleString()}/${totalCombos.toLocaleString()})\n`);
+
+    // ── Progress line ──────────────────────────────────────────────────────────
+    if (done % REPORT_EVERY === 0) {
+      const elapsed     = (Date.now() - sweepStart) / 1000;
+      const simsPerSec  = done / elapsed;
+      const etaSec      = (totalCombos - done) / simsPerSec;
+      const eta         = etaSec > 3600 ? `${(etaSec / 3600).toFixed(1)}h` : `${Math.round(etaSec / 60)}m`;
+      const best        = topK.best;
+      const bestStr     = best
+        ? `score=${best.score.toFixed(1)} α=${best.inSample.alpha.toFixed(1)}% sBuy=${best.params.strongBuyRsi} mBuy=${best.params.moderateBuyRsi} drift=${best.params.driftThresholdPct}`
+        : '—';
+      process.stdout.write(
+        `\r  ${done.toLocaleString()}/${totalCombos.toLocaleString()} (${Math.round(done / totalCombos * 100)}%)`
+        + ` | ${Math.round(simsPerSec)} sim/s | ETA ${eta} | best: ${bestStr}    `,
+      );
+    }
+
+    // ── Checkpoint ─────────────────────────────────────────────────────────────
+    if (done % CHECKPOINT_EVERY === 0) {
+      process.stdout.write('\n');
+      saveCheckpoint({ version: 1, mode, fast: fastMode, startMs: START_MS, splitMs: SPLIT_MS, totalCombos, doneCount: done, topResults: topK.all, savedAt: Date.now() });
+      console.log(`  [checkpoint] ${done.toLocaleString()} sims saved — top score ${topK.best?.score.toFixed(1) ?? '—'}`);
     }
   }
 
-  results.sort((a, b) => b.score - a.score);
+  process.stdout.write('\n\n');
 
-  // ── Phase 2: validate top 100 on out-of-sample ──────────────────────────────
-  const TOP_N = 100;
-  console.log(`\nValidating top ${TOP_N} parameter sets on out-of-sample period...`);
-  for (let i = 0; i < Math.min(TOP_N, results.length); i++) {
-    const r = results[i];
+  // ── Phase 2: validate all top-K on out-of-sample ────────────────────────────
+  const finalResults = topK.all;
+  console.log(`Validating top ${finalResults.length} parameter sets on out-of-sample period...`);
+  for (const r of finalResults) {
     r.outSample = simulate(r.params, candles4h, candles3d, rsiSeries4h, vwapSeries4h, smaSeries3d, rsiPeriod, outSampleStart, outSampleEnd);
   }
 
-  // ── Print top 20 ────────────────────────────────────────────────────────────
-  console.log('\n╔═════════════════════════════════════════════════════════════════════════╗');
-  console.log('║                    TOP 20 RESULTS (in-sample ranked)                   ║');
-  console.log('╚═════════════════════════════════════════════════════════════════════════╝\n');
+  // ── Print results ────────────────────────────────────────────────────────────
+  const isYear  = new Date(START_MS).getFullYear() + '–' + new Date(SPLIT_MS).getFullYear();
+  const osYear  = new Date(SPLIT_MS).getFullYear() + '–now';
+  const fmt     = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
 
-  const fmt  = (n: number, d = 1) => `${n >= 0 ? '+' : ''}${n.toFixed(d)}%`;
-  const fmtN = (n: number)        => `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
+  console.log(`\n╔═════════════════════════════════════════════════════════════════════════╗`);
+  console.log(`║             TOP ${String(finalResults.length).padEnd(3)} RESULTS (in-sample ranked)                     ║`);
+  console.log(`╚═════════════════════════════════════════════════════════════════════════╝\n`);
+  console.log(`        ─── IN-SAMPLE ${isYear} ───    ─── OUT-OF-SAMPLE ${osYear} ───    params →`);
+  console.log(`Rank Score Alpha  Sharpe  MaxDD  Tr  WinR%    Alpha  Sharpe  MaxDD  Tr  WinR%    sBuy mBuy mSell sSell drift stop tsAct tsT bearCut bMult bDrft bRsi bVwap`);
+  console.log('─'.repeat(195));
 
-  console.log(
-    '        ───────── IN-SAMPLE 2022–2024 ──────────    ─── OUT-OF-SAMPLE 2025–now ───'
-    + '    params →',
-  );
-  console.log(
-    'Rank  Score  Alpha  Sharpe  MaxDD  Trades  WinR%'
-    + '    Alpha  Sharpe  MaxDD  Trades  WinR%'
-    + '    sBuy mBuy mSell sSell drift stop tsAct tsT bearCut bMult bDrft bRsi bVwap',
-  );
-  console.log('─'.repeat(200));
-
-  for (let i = 0; i < Math.min(20, results.length); i++) {
-    const r  = results[i];
+  for (let i = 0; i < finalResults.length; i++) {
+    const r  = finalResults[i];
     const p  = r.params;
     const IS = r.inSample;
     const OS = r.outSample;
     console.log(
-      `${String(i + 1).padStart(4)}  `
-      + `${r.score.toFixed(1).padStart(5)}  `
-      + `${fmt(IS.alpha).padStart(6)}  `
-      + `${IS.sharpe.toFixed(2).padStart(6)}  `
-      + `${('-' + IS.maxDD.toFixed(1) + '%').padStart(6)}  `
-      + `${String(IS.trades).padStart(6)}  `
-      + `${IS.winRate.toFixed(0).padStart(4)}%`
+      `${String(i + 1).padStart(4)} ${r.score.toFixed(1).padStart(5)} ${fmt(IS.alpha).padStart(6)} ${IS.sharpe.toFixed(2).padStart(6)}  ${('-' + IS.maxDD.toFixed(1) + '%').padStart(6)} ${String(IS.trades).padStart(4)} ${IS.winRate.toFixed(0).padStart(4)}%`
       + (OS
-        ? `    ${fmtN(OS.alpha).padStart(6)}  ${OS.sharpe.toFixed(2).padStart(6)}  ${('-' + OS.maxDD.toFixed(1) + '%').padStart(6)}  ${String(OS.trades).padStart(6)}  ${OS.winRate.toFixed(0).padStart(4)}%`
-        : '    (not validated)                              ')
+        ? `    ${fmt(OS.alpha).padStart(6)} ${OS.sharpe.toFixed(2).padStart(6)}  ${('-' + OS.maxDD.toFixed(1) + '%').padStart(6)} ${String(OS.trades).padStart(4)} ${OS.winRate.toFixed(0).padStart(4)}%`
+        : '    (not validated)                     ')
       + `    ${String(p.strongBuyRsi).padStart(4)} ${String(p.moderateBuyRsi).padStart(4)} ${String(p.moderateSellRsi).padStart(5)} ${String(p.strongSellRsi).padStart(5)}`
       + ` ${String(p.driftThresholdPct).padStart(5)} ${String(p.stopLossPct).padStart(4)} ${String(p.trailingStopActivationPct).padStart(5)} ${String(p.trailingStopPct).padStart(3)}`
       + ` ${String(p.bearishSolCutPct).padStart(7)} ${String(p.bearTargetMultiplier).padStart(5)} ${String(p.bearDriftOverridePct).padStart(5)} ${String(p.bearModerateBuyRsiAdjustment).padStart(4)} ${String(p.bearExtraVwapDiscountPct).padStart(5)}`,
     );
   }
 
-  // B&H references
-  console.log(`\nIn-sample  B&H: return ${fmt(results[0].inSample.bhReturn)},  max drawdown -${results[0].inSample.bhDD.toFixed(1)}%`);
-  if (results[0].outSample) {
-    console.log(`Out-of-sample B&H: return ${fmt(results[0].outSample.bhReturn)},  max drawdown -${results[0].outSample.bhDD.toFixed(1)}%`);
+  if (finalResults[0]) {
+    console.log(`\nIn-sample  B&H: return ${fmt(finalResults[0].inSample.bhReturn)},  max drawdown -${finalResults[0].inSample.bhDD.toFixed(1)}%`);
+    if (finalResults[0].outSample) {
+      console.log(`Out-of-sample B&H: return ${fmt(finalResults[0].outSample.bhReturn)},  max drawdown -${finalResults[0].outSample.bhDD.toFixed(1)}%`);
+    }
   }
 
-  // ── Write CSV ───────────────────────────────────────────────────────────────
-  const outPath = path.join(__dirname, '../optimize_results.csv');
+  // ── Write CSV ────────────────────────────────────────────────────────────────
+  const outPath    = path.join(__dirname, '../optimize_results.csv');
   const metricCols = (prefix: string) => [
     `${prefix}_finalValue`, `${prefix}_stratReturn`, `${prefix}_bhReturn`, `${prefix}_alpha`,
     `${prefix}_sharpe`, `${prefix}_maxDD`, `${prefix}_bhDD`, `${prefix}_ddDelta`,
@@ -554,22 +682,25 @@ async function main(): Promise<void> {
   ];
   const metricVals = (m: PeriodMetrics | null) => m
     ? [m.finalValue.toFixed(4), m.stratReturn.toFixed(3), m.bhReturn.toFixed(3), m.alpha.toFixed(3),
-       m.sharpe.toFixed(4), m.maxDD.toFixed(3), m.bhDD.toFixed(3), m.ddDelta.toFixed(3),
-       m.trades, m.winRate.toFixed(2)]
+       m.sharpe.toFixed(4), m.maxDD.toFixed(3), m.bhDD.toFixed(3), m.ddDelta.toFixed(3), m.trades, m.winRate.toFixed(2)]
     : Array(10).fill('');
 
   const header = ['rank', 'score', ...metricCols('is'), ...metricCols('os'), ...gridKeys].join(',');
-  const rows   = results.map((r, idx) => [
-    idx + 1,
-    r.score.toFixed(3),
-    ...metricVals(r.inSample),
-    ...metricVals(r.outSample),
+  const rows   = finalResults.map((r, idx) => [
+    idx + 1, r.score.toFixed(3),
+    ...metricVals(r.inSample), ...metricVals(r.outSample),
     ...gridKeys.map(k => r.params[k]),
   ].join(','));
 
   fs.writeFileSync(outPath, [header, ...rows].join('\n'));
-  console.log(`\nFull results (${results.length} rows) written to: optimize_results.csv`);
-  console.log('Columns: rank, score, in-sample metrics (is_*), out-of-sample metrics (os_*), params\n');
+  console.log(`\nTop ${finalResults.length} results written to: optimize_results.csv`);
+  console.log('Columns: rank, score, is_* (in-sample), os_* (out-of-sample), params\n');
+
+  // Clean up checkpoint on successful completion
+  if (fs.existsSync(CHECKPOINT_FILE)) {
+    fs.unlinkSync(CHECKPOINT_FILE);
+    console.log('Checkpoint file removed (run complete).\n');
+  }
 }
 
 main().catch(err => { console.error('\nOptimizer failed:', err.message); process.exit(1); });
