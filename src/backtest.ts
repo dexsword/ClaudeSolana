@@ -17,6 +17,7 @@
  *   CRYPTOCOMPARE_API_KEY=xxx npx ts-node src/backtest.ts [--from=YYYY-MM-DD] [--slippage=0.2]
  */
 
+import 'dotenv/config';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
