@@ -4,15 +4,20 @@
  * Fetches candle data ONCE, then sweeps a grid of parameter combinations
  * entirely in memory — no additional API calls during optimization.
  *
+ * Train / validate split:
+ *   In-sample  : --from  (default 2022-03-01) → --split (default 2025-01-01)
+ *   Out-of-sample: --split → now
+ *
  * Grid size: 3^13 = 1 594 323 combinations (9 zone/risk axes + 4 regime axes).
  * Each simulation is ~2 ms, so the full sweep completes in ~50–60 minutes.
  *
  * Usage:
  *   CRYPTOCOMPARE_API_KEY=xxx npm run optimize
- *   CRYPTOCOMPARE_API_KEY=xxx npx ts-node src/optimize.ts [--from=YYYY-MM-DD]
+ *   CRYPTOCOMPARE_API_KEY=xxx npx ts-node src/optimize.ts [--from=YYYY-MM-DD] [--split=YYYY-MM-DD]
  *
  * Output:
- *   optimize_results.csv  — all combinations ranked by composite score
+ *   optimize_results.csv  — all combinations ranked by in-sample score,
+ *                           with out-of-sample validation metrics alongside
  */
 
 import axios from 'axios';
@@ -23,9 +28,11 @@ import { evaluateStrategy, updateTrailingStop, buildInitialPosition } from './st
 import { calculateRSI, calculateVWAP, calculateSMA } from './indicators';
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
-const args    = process.argv.slice(2);
-const fromArg = args.find(a => a.startsWith('--from='))?.split('=')[1];
-const START_MS = fromArg ? new Date(fromArg).getTime() : new Date('2022-03-01').getTime();
+const args     = process.argv.slice(2);
+const fromArg  = args.find(a => a.startsWith('--from='))?.split('=')[1];
+const splitArg = args.find(a => a.startsWith('--split='))?.split('=')[1];
+const START_MS = fromArg  ? new Date(fromArg).getTime()  : new Date('2022-03-01').getTime();
+const SPLIT_MS = splitArg ? new Date(splitArg).getTime() : new Date('2025-01-01').getTime();
 const CC_KEY   = process.env.CRYPTOCOMPARE_API_KEY ?? '';
 if (!CC_KEY) {
   console.error('ERROR: CRYPTOCOMPARE_API_KEY is not set.');
@@ -179,8 +186,7 @@ function* gridCombinations(): Generator<ParamSet> {
 }
 
 // ── Simulation result ─────────────────────────────────────────────────────────
-interface SimResult {
-  params:      ParamSet;
+interface PeriodMetrics {
   finalValue:  number;
   stratReturn: number;
   bhReturn:    number;
@@ -191,10 +197,20 @@ interface SimResult {
   ddDelta:     number;   // bhDD - maxDD: positive = less drawdown than B&H
   trades:      number;
   winRate:     number;
-  score:       number;   // composite ranking score
+}
+
+interface SimResult {
+  params:  ParamSet;
+  inSample: PeriodMetrics;
+  outSample: PeriodMetrics | null;  // null until validation pass
+  score:   number;   // composite score from in-sample only
 }
 
 // ── Core simulation (no I/O, pure computation) ────────────────────────────────
+/**
+ * @param simStartIdx  First candle index to trade on (must be >= rsiPeriod+2 for warm indicators)
+ * @param simEndIdx    Exclusive upper bound (candles4h.length for full run)
+ */
 function simulate(
   params: ParamSet,
   candles4h: Candle[],
@@ -203,7 +219,9 @@ function simulate(
   vwapSeries4h: (number | null)[],
   smaSeries3d:  (number | null)[],
   rsiPeriod: number,
-): Omit<SimResult, 'params' | 'score'> {
+  simStartIdx: number,
+  simEndIdx: number,
+): PeriodMetrics {
 
   // Build a config override from params
   const cfg: BotConfig = JSON.parse(JSON.stringify(baseCfg));
@@ -225,8 +243,13 @@ function simulate(
   cfg.strategy.regime.bearModerateBuyRsiAdjustment = params.bearModerateBuyRsiAdjustment;
   cfg.strategy.regime.bearExtraVwapDiscountPct     = params.bearExtraVwapDiscountPct;
 
-  // Precomputed SMA3d pointer (reset per run)
+  // SMA3d pointer — initialise just before simStartIdx so getSma3d() is correct from candle 0
+  const simStartTs = candles4h[simStartIdx].timestamp;
   let sma3dPtr = 0;
+  while (sma3dPtr + 1 < candles3d.length && candles3d[sma3dPtr + 1].timestamp <= simStartTs) {
+    sma3dPtr++;
+  }
+
   function getSma3d(atTs: number): number | null {
     while (sma3dPtr + 1 < candles3d.length && candles3d[sma3dPtr + 1].timestamp <= atTs) sma3dPtr++;
     for (let j = sma3dPtr; j >= 0; j--) {
@@ -257,13 +280,12 @@ function simulate(
   let pendingZone: string | null = null;
   let pendingZoneCount = 0;
 
-  const warmup = rsiPeriod + 2;
   const equity: { value: number; price: number }[] = [];
   let   tradeCount = 0;
   let   winCount   = 0;
   let   totalSells = 0;
 
-  for (let i = warmup; i < candles4h.length; i++) {
+  for (let i = simStartIdx; i < simEndIdx; i++) {
     const candle = candles4h[i];
     const price  = candle.close;
     const nowMs  = candle.timestamp;
@@ -346,8 +368,8 @@ function simulate(
   }
 
   // ── Metrics ────────────────────────────────────────────────────────────────
-  const firstCandle = candles4h[warmup];
-  const lastCandle  = candles4h[candles4h.length - 1];
+  const firstCandle = candles4h[simStartIdx];
+  const lastCandle  = candles4h[simEndIdx - 1];
   const firstPrice  = firstCandle.close;
   const lastPrice   = lastCandle.close;
   const totalDays   = (lastCandle.timestamp - firstCandle.timestamp) / 86400000;
@@ -391,8 +413,8 @@ function simulate(
 // ── Composite score ───────────────────────────────────────────────────────────
 // Weights reflect: alpha beats all, then Sharpe, then drawdown protection.
 // Sharpe multiplied by 20 to put it on a similar scale to pct values.
-function score(r: Omit<SimResult, 'params' | 'score'>): number {
-  return r.alpha * 0.45 + r.sharpe * 20 * 0.35 + r.ddDelta * 0.20;
+function score(m: PeriodMetrics): number {
+  return m.alpha * 0.45 + m.sharpe * 20 * 0.35 + m.ddDelta * 0.20;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -403,20 +425,21 @@ async function main(): Promise<void> {
   console.log('║         SOL Swing Bot — Parameter Optimizer           ║');
   console.log('╚═══════════════════════════════════════════════════════╝\n');
 
-  const gridKeys = Object.keys(GRID) as (keyof ParamSet)[];
+  const gridKeys    = Object.keys(GRID) as (keyof ParamSet)[];
   const totalCombos = gridKeys.reduce((a, k) => a * GRID[k].length, 1);
-  console.log(`Grid : ${gridKeys.map(k => `${k}[${GRID[k].length}]`).join(', ')}`);
-  console.log(`Combos: ${totalCombos.toLocaleString()}`);
-  console.log(`From  : ${new Date(START_MS).toDateString()}\n`);
+  console.log(`In-sample : ${new Date(START_MS).toDateString()} → ${new Date(SPLIT_MS).toDateString()}`);
+  console.log(`Validation: ${new Date(SPLIT_MS).toDateString()} → ${new Date(endMs).toDateString()}`);
+  console.log(`Grid      : ${gridKeys.map(k => `${k}[${GRID[k].length}]`).join(', ')}`);
+  console.log(`Combos    : ${totalCombos.toLocaleString()}\n`);
 
-  // ── Fetch data once ─────────────────────────────────────────────────────────
+  // ── Fetch full dataset once ──────────────────────────────────────────────────
   process.stdout.write('Fetching hourly OHLCV ');
-  const hourly = await fetchCCCandles('histohour', START_MS, endMs);
+  const hourly    = await fetchCCCandles('histohour', START_MS, endMs);
   const candles4h = aggregateTo4h(hourly);
   console.log(` ${hourly.length} hourly → ${candles4h.length} 4h candles`);
 
   process.stdout.write('Fetching daily OHLCV  ');
-  const daily = await fetchCCCandles('histoday', START_MS, endMs);
+  const daily     = await fetchCCCandles('histoday', START_MS, endMs);
   const candles3d = aggregateTo3d(daily);
   console.log(` ${daily.length} daily → ${candles3d.length} 3d candles\n`);
 
@@ -424,22 +447,41 @@ async function main(): Promise<void> {
     console.error('Not enough data.'); process.exit(1);
   }
 
-  // ── Precompute indicators (shared across all runs) ──────────────────────────
-  const rsiPeriod   = baseCfg.strategy.rsi.period;
-  const smaPeriod   = baseCfg.strategy.sma.period;
+  // ── Precompute indicators on full dataset (shared across all runs) ───────────
+  const rsiPeriod    = baseCfg.strategy.rsi.period;
+  const smaPeriod    = baseCfg.strategy.sma.period;
   const rsiSeries4h  = calculateRSI(candles4h, rsiPeriod);
   const vwapSeries4h = calculateVWAP(candles4h, true);
   const smaSeries3d  = calculateSMA(candles3d, smaPeriod);
 
-  // ── Grid sweep ──────────────────────────────────────────────────────────────
-  console.log(`Running ${totalCombos.toLocaleString()} simulations...`);
+  // ── Locate split and boundary indices ───────────────────────────────────────
+  const warmup = rsiPeriod + 2;
+  // First 4h candle at or after SPLIT_MS
+  const splitIdx4h = candles4h.findIndex(c => c.timestamp >= SPLIT_MS);
+  if (splitIdx4h < warmup + 1) {
+    console.error('Split date is too early — not enough in-sample candles for warm-up.'); process.exit(1);
+  }
+  if (splitIdx4h >= candles4h.length - 1) {
+    console.error('Split date is too late — no out-of-sample candles remain.'); process.exit(1);
+  }
+
+  const inSampleStart  = warmup;
+  const inSampleEnd    = splitIdx4h;       // exclusive
+  const outSampleStart = splitIdx4h;       // inclusive; indicators already warmed up
+  const outSampleEnd   = candles4h.length; // exclusive
+
+  console.log(`In-sample candles  : ${inSampleEnd - inSampleStart}`);
+  console.log(`Out-of-sample candles: ${outSampleEnd - outSampleStart}\n`);
+
+  // ── Phase 1: grid sweep on in-sample ────────────────────────────────────────
+  console.log(`Running ${totalCombos.toLocaleString()} in-sample simulations...`);
   const results: SimResult[] = [];
   let done = 0;
-  const reportEvery = Math.floor(totalCombos / 20);
+  const reportEvery = Math.max(1, Math.floor(totalCombos / 20));
 
   for (const params of gridCombinations()) {
-    const r = simulate(params, candles4h, candles3d, rsiSeries4h, vwapSeries4h, smaSeries3d, rsiPeriod);
-    results.push({ params, ...r, score: score(r) });
+    const m = simulate(params, candles4h, candles3d, rsiSeries4h, vwapSeries4h, smaSeries3d, rsiPeriod, inSampleStart, inSampleEnd);
+    results.push({ params, inSample: m, outSample: null, score: score(m) });
     done++;
     if (done % reportEvery === 0) {
       process.stdout.write(`  ${Math.round(done / totalCombos * 100)}% (${done.toLocaleString()}/${totalCombos.toLocaleString()})\n`);
@@ -448,77 +490,86 @@ async function main(): Promise<void> {
 
   results.sort((a, b) => b.score - a.score);
 
-  // ── Print top 20 ────────────────────────────────────────────────────────────
-  console.log('\n╔═══════════════════════════════════════════════════════╗');
-  console.log('║                    TOP 20 RESULTS                     ║');
-  console.log('╚═══════════════════════════════════════════════════════╝\n');
+  // ── Phase 2: validate top 100 on out-of-sample ──────────────────────────────
+  const TOP_N = 100;
+  console.log(`\nValidating top ${TOP_N} parameter sets on out-of-sample period...`);
+  for (let i = 0; i < Math.min(TOP_N, results.length); i++) {
+    const r = results[i];
+    r.outSample = simulate(r.params, candles4h, candles3d, rsiSeries4h, vwapSeries4h, smaSeries3d, rsiPeriod, outSampleStart, outSampleEnd);
+  }
 
-  const bhReturn = results[0]?.bhReturn ?? 0;
-  const bhDD     = results[0]?.bhDD ?? 0;
+  // ── Print top 20 ────────────────────────────────────────────────────────────
+  console.log('\n╔═════════════════════════════════════════════════════════════════════════╗');
+  console.log('║                    TOP 20 RESULTS (in-sample ranked)                   ║');
+  console.log('╚═════════════════════════════════════════════════════════════════════════╝\n');
+
+  const fmt  = (n: number, d = 1) => `${n >= 0 ? '+' : ''}${n.toFixed(d)}%`;
+  const fmtN = (n: number)        => `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
 
   console.log(
-    'Rank  Score   Alpha   Sharpe  MaxDD   Trades  WinR%'
-    + '  sBuyRSI mBuyRSI mSellRSI sSellRSI drift  stop  tsAct tsTrail bearCut'
-    + '  bMult bDrift bRsiAdj bVwap',
+    '        ───────── IN-SAMPLE 2022–2024 ──────────    ─── OUT-OF-SAMPLE 2025–now ───'
+    + '    params →',
   );
-  console.log('─'.repeat(165));
+  console.log(
+    'Rank  Score  Alpha  Sharpe  MaxDD  Trades  WinR%'
+    + '    Alpha  Sharpe  MaxDD  Trades  WinR%'
+    + '    sBuy mBuy mSell sSell drift stop tsAct tsT bearCut bMult bDrft bRsi bVwap',
+  );
+  console.log('─'.repeat(200));
 
   for (let i = 0; i < Math.min(20, results.length); i++) {
-    const r = results[i];
-    const p = r.params;
+    const r  = results[i];
+    const p  = r.params;
+    const IS = r.inSample;
+    const OS = r.outSample;
     console.log(
       `${String(i + 1).padStart(4)}  `
-      + `${r.score.toFixed(1).padStart(6)}  `
-      + `${(r.alpha >= 0 ? '+' : '') + r.alpha.toFixed(1) + '%'}`.padStart(7) + '  '
-      + `${r.sharpe.toFixed(2).padStart(6)}  `
-      + `${('-' + r.maxDD.toFixed(1) + '%').padStart(7)}  `
-      + `${String(r.trades).padStart(6)}  `
-      + `${r.winRate.toFixed(0).padStart(5)}%`
-      + `  ${String(p.strongBuyRsi).padStart(7)}`
-      + ` ${String(p.moderateBuyRsi).padStart(7)}`
-      + ` ${String(p.moderateSellRsi).padStart(8)}`
-      + ` ${String(p.strongSellRsi).padStart(8)}`
-      + ` ${String(p.driftThresholdPct).padStart(5)}`
-      + ` ${String(p.stopLossPct).padStart(5)}`
-      + ` ${String(p.trailingStopActivationPct).padStart(6)}`
-      + ` ${String(p.trailingStopPct).padStart(7)}`
-      + ` ${String(p.bearishSolCutPct).padStart(7)}`
-      + `  ${String(p.bearTargetMultiplier).padStart(5)}`
-      + ` ${String(p.bearDriftOverridePct).padStart(6)}`
-      + ` ${String(p.bearModerateBuyRsiAdjustment).padStart(7)}`
-      + ` ${String(p.bearExtraVwapDiscountPct).padStart(5)}`,
+      + `${r.score.toFixed(1).padStart(5)}  `
+      + `${fmt(IS.alpha).padStart(6)}  `
+      + `${IS.sharpe.toFixed(2).padStart(6)}  `
+      + `${('-' + IS.maxDD.toFixed(1) + '%').padStart(6)}  `
+      + `${String(IS.trades).padStart(6)}  `
+      + `${IS.winRate.toFixed(0).padStart(4)}%`
+      + (OS
+        ? `    ${fmtN(OS.alpha).padStart(6)}  ${OS.sharpe.toFixed(2).padStart(6)}  ${('-' + OS.maxDD.toFixed(1) + '%').padStart(6)}  ${String(OS.trades).padStart(6)}  ${OS.winRate.toFixed(0).padStart(4)}%`
+        : '    (not validated)                              ')
+      + `    ${String(p.strongBuyRsi).padStart(4)} ${String(p.moderateBuyRsi).padStart(4)} ${String(p.moderateSellRsi).padStart(5)} ${String(p.strongSellRsi).padStart(5)}`
+      + ` ${String(p.driftThresholdPct).padStart(5)} ${String(p.stopLossPct).padStart(4)} ${String(p.trailingStopActivationPct).padStart(5)} ${String(p.trailingStopPct).padStart(3)}`
+      + ` ${String(p.bearishSolCutPct).padStart(7)} ${String(p.bearTargetMultiplier).padStart(5)} ${String(p.bearDriftOverridePct).padStart(5)} ${String(p.bearModerateBuyRsiAdjustment).padStart(4)} ${String(p.bearExtraVwapDiscountPct).padStart(5)}`,
     );
   }
 
-  console.log(`\nBuy & Hold reference: return ${bhReturn >= 0 ? '+' : ''}${bhReturn.toFixed(1)}%,  max drawdown -${bhDD.toFixed(1)}%`);
+  // B&H references
+  console.log(`\nIn-sample  B&H: return ${fmt(results[0].inSample.bhReturn)},  max drawdown -${results[0].inSample.bhDD.toFixed(1)}%`);
+  if (results[0].outSample) {
+    console.log(`Out-of-sample B&H: return ${fmt(results[0].outSample.bhReturn)},  max drawdown -${results[0].outSample.bhDD.toFixed(1)}%`);
+  }
 
   // ── Write CSV ───────────────────────────────────────────────────────────────
   const outPath = path.join(__dirname, '../optimize_results.csv');
-  const header = [
-    'rank', 'score', 'finalValue', 'stratReturn', 'bhReturn', 'alpha',
-    'sharpe', 'maxDD', 'bhDD', 'ddDelta', 'trades', 'winRate',
-    ...gridKeys,
-  ].join(',');
+  const metricCols = (prefix: string) => [
+    `${prefix}_finalValue`, `${prefix}_stratReturn`, `${prefix}_bhReturn`, `${prefix}_alpha`,
+    `${prefix}_sharpe`, `${prefix}_maxDD`, `${prefix}_bhDD`, `${prefix}_ddDelta`,
+    `${prefix}_trades`, `${prefix}_winRate`,
+  ];
+  const metricVals = (m: PeriodMetrics | null) => m
+    ? [m.finalValue.toFixed(4), m.stratReturn.toFixed(3), m.bhReturn.toFixed(3), m.alpha.toFixed(3),
+       m.sharpe.toFixed(4), m.maxDD.toFixed(3), m.bhDD.toFixed(3), m.ddDelta.toFixed(3),
+       m.trades, m.winRate.toFixed(2)]
+    : Array(10).fill('');
 
-  const rows = results.map((r, idx) => [
+  const header = ['rank', 'score', ...metricCols('is'), ...metricCols('os'), ...gridKeys].join(',');
+  const rows   = results.map((r, idx) => [
     idx + 1,
     r.score.toFixed(3),
-    r.finalValue.toFixed(4),
-    r.stratReturn.toFixed(3),
-    r.bhReturn.toFixed(3),
-    r.alpha.toFixed(3),
-    r.sharpe.toFixed(4),
-    r.maxDD.toFixed(3),
-    r.bhDD.toFixed(3),
-    r.ddDelta.toFixed(3),
-    r.trades,
-    r.winRate.toFixed(2),
+    ...metricVals(r.inSample),
+    ...metricVals(r.outSample),
     ...gridKeys.map(k => r.params[k]),
   ].join(','));
 
   fs.writeFileSync(outPath, [header, ...rows].join('\n'));
-  console.log(`\nFull results written to: optimize_results.csv  (${results.length} rows)`);
-  console.log('\n💡 Open the CSV in any spreadsheet app to explore the full results.\n');
+  console.log(`\nFull results (${results.length} rows) written to: optimize_results.csv`);
+  console.log('Columns: rank, score, in-sample metrics (is_*), out-of-sample metrics (os_*), params\n');
 }
 
 main().catch(err => { console.error('\nOptimizer failed:', err.message); process.exit(1); });
