@@ -1,4 +1,4 @@
-import { BotConfig, PositionState, RsiDirection, StrategySignal, TrendBias } from './types';
+import { BotConfig, PositionState, RegimePolicy, RsiDirection, StrategySignal, TrendBias } from './types';
 
 export function determineTrendBias(
   price: number,
@@ -32,6 +32,35 @@ export function determineTrendBias(
   if (pctFromSma > outerZone) return 'bullish';
   if (pctFromSma < -outerZone) return 'bearish';
   return 'neutral';
+}
+
+/**
+ * Returns the regime-level trading policy for the current trend bias.
+ *
+ * Bullish / neutral: permissive — no adjustments.
+ * Bearish: tighter RSI/VWAP entry requirements, reduced exposure multiplier,
+ *          tighter drift threshold so the bot acts faster on deteriorating positions.
+ */
+export function getRegimePolicy(trendBias: TrendBias): RegimePolicy {
+  if (trendBias === 'bearish') {
+    return {
+      buyEnabled:                  true,   // still buy deep dips — just with stricter bars
+      sellEnabled:                 true,
+      targetMultiplier:            0.80,   // scale down all zone targets by 20% in bear markets
+      driftThresholdOverridePct:   6,      // react faster (default 9 → 6) to deteriorating positions
+      moderateBuyRsiAdjustment:    -4,     // moderate_buy requires RSI ≤ (moderateBuyRsi - 4) = 33
+      requiredExtraVwapDiscountPct: 1.5,   // need 1.5% deeper VWAP discount before buying
+    };
+  }
+  // bullish and neutral: no adjustments — zone logic runs as-is
+  return {
+    buyEnabled:                  true,
+    sellEnabled:                 true,
+    targetMultiplier:            1.0,
+    driftThresholdOverridePct:   undefined,
+    moderateBuyRsiAdjustment:    0,
+    requiredExtraVwapDiscountPct: 0,
+  };
 }
 
 /**
@@ -190,11 +219,22 @@ export function evaluateStrategy(
   }
 
   const vwapDevPct = ((price - vwap4h) / vwap4h) * 100;
-  const { targetSolPct, zone } = determineZone(rsi4h, vwapDevPct, trendBias, cfg);
-  const drift = currentSolPct - targetSolPct;
-  const threshold = cfg.strategy.rebalance.driftThresholdPct;
+  const { targetSolPct: rawTargetSolPct, zone } = determineZone(rsi4h, vwapDevPct, trendBias, cfg);
 
-  const zoneInfo = `Zone: ${zone} [trend: ${trendBias}] | RSI ${rsi4h.toFixed(1)} (${rsiDirection}), VWAP dev ${vwapDevPct.toFixed(1)}% | Target: ${targetSolPct}% SOL, current: ${currentSolPct.toFixed(1)}%`;
+  // ── REGIME POLICY ──────────────────────────────────────────────────────────
+  // Applied after zone determination — scales target exposure and tightens entry
+  // criteria in bearish regimes without touching the zone classification itself.
+  const policy = getRegimePolicy(trendBias);
+
+  // Scale down target allocation in bearish regime (multiplicative, on top of bearishSolCutPct)
+  const targetSolPct = Math.max(10, Math.min(85, Math.round(rawTargetSolPct * policy.targetMultiplier)));
+
+  // Tighter drift threshold in bearish regime — react faster to deteriorating positions
+  const threshold = policy.driftThresholdOverridePct ?? cfg.strategy.rebalance.driftThresholdPct;
+
+  const drift = currentSolPct - targetSolPct;
+
+  const zoneInfo = `Zone: ${zone} [trend: ${trendBias}, multiplier: ${policy.targetMultiplier}x] | RSI ${rsi4h.toFixed(1)} (${rsiDirection}), VWAP dev ${vwapDevPct.toFixed(1)}% | Target: ${targetSolPct}% SOL (raw: ${rawTargetSolPct}%), current: ${currentSolPct.toFixed(1)}%, drift threshold: ${threshold}%`;
 
   // Sell signals: execute without RSI direction filter (protecting gains is priority)
   if (drift > threshold) {
@@ -207,11 +247,45 @@ export function evaluateStrategy(
     };
   }
 
-  // Buy signals: apply RSI direction filter for moderate_buy only.
-  // When RSI is rising through the moderate_buy zone (30→40) it may be bouncing,
-  // not dipping. Wait for RSI to stop rising before buying the dip.
-  // Strong_buy (RSI < 28) is extreme enough that direction doesn't matter — act immediately.
+  // Buy signals
   if (drift < -threshold) {
+    // Regime gate: buys fully disabled (not used in current policy but respected if set)
+    if (!policy.buyEnabled) {
+      return {
+        ...base,
+        action: 'hold',
+        reason: `${zoneInfo} — buys disabled in ${trendBias} regime`,
+        zone,
+        targetSolPct,
+      };
+    }
+
+    // Bearish regime: apply stricter RSI and VWAP entry bars for moderate_buy.
+    // Strong_buy (extreme oversold) bypasses the RSI gate — deep dips still trigger.
+    // Both zones must clear the deeper VWAP discount bar.
+    if (trendBias === 'bearish' && (zone === 'moderate_buy' || zone === 'strong_buy')) {
+      const rsiCeiling = cfg.strategy.rebalance.moderateBuyRsi + policy.moderateBuyRsiAdjustment;
+      const rsiTooHigh = zone === 'moderate_buy' && rsi4h > rsiCeiling;
+
+      const vwapBar = cfg.strategy.rebalance.moderateBuyVwapPct + policy.requiredExtraVwapDiscountPct;
+      const notDiscountedEnough = vwapDevPct > -vwapBar;
+
+      if (rsiTooHigh || notDiscountedEnough) {
+        const why = rsiTooHigh
+          ? `RSI ${rsi4h.toFixed(1)} > bearish ceiling ${rsiCeiling}`
+          : `VWAP dev ${vwapDevPct.toFixed(1)}% > required -${vwapBar}%`;
+        return {
+          ...base,
+          action: 'hold',
+          reason: `${zoneInfo} — bearish regime buy blocked: ${why}`,
+          zone,
+          targetSolPct,
+        };
+      }
+    }
+
+    // RSI direction filter for moderate_buy only (unchanged from original).
+    // Rising RSI through moderate_buy may be a bounce — wait for it to stabilise.
     if (zone === 'moderate_buy' && rsiDirection === 'rising') {
       return {
         ...base,
@@ -221,6 +295,7 @@ export function evaluateStrategy(
         targetSolPct,
       };
     }
+
     return {
       ...base,
       action: 'rebalance_buy',
@@ -233,7 +308,7 @@ export function evaluateStrategy(
   return {
     ...base,
     action: 'hold',
-    reason: `${zoneInfo} — within ${threshold}% drift threshold (drift ${drift > 0 ? '+' : ''}${drift.toFixed(1)}%)`,
+    reason: `${zoneInfo} — within threshold (drift ${drift > 0 ? '+' : ''}${drift.toFixed(1)}%)`,
     zone,
     targetSolPct,
   };

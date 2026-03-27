@@ -15,6 +15,24 @@ export interface IndicatorResult {
 
 export type TrendBias = 'bullish' | 'neutral' | 'bearish';
 
+/**
+ * Regime-level trading policy derived from the current trend bias.
+ * Applied on top of zone logic to modulate exposure and entry quality
+ * without rewriting the core RSI/VWAP zone system.
+ */
+export type RegimePolicy = {
+  buyEnabled: boolean;
+  sellEnabled: boolean;
+  /** Multiplicative scalar applied to zone targetSolPct after trend adjustment. */
+  targetMultiplier: number;
+  /** If set, overrides cfg.strategy.rebalance.driftThresholdPct for this regime. */
+  driftThresholdOverridePct?: number;
+  /** Added to moderateBuyRsi threshold — negative = require lower RSI to buy. */
+  moderateBuyRsiAdjustment: number;
+  /** Extra VWAP discount required below the configured moderateBuyVwapPct. */
+  requiredExtraVwapDiscountPct: number;
+};
+
 export type RsiDirection = 'rising' | 'falling' | 'flat';
 
 export interface PositionState {
