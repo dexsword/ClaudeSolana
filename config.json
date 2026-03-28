@@ -13,22 +13,22 @@
     },
     "rebalance": {
       "bootstrapRsiThreshold": 62,
-      "driftThresholdPct": 9,
+      "driftThresholdPct": 12,
       "minTradeUSDC": 3,
 
       "buyConfirmationCandles": 1,
-      "sellConfirmationCandles": 2,
+      "sellConfirmationCandles": 1,
 
       "trendAdjustment": {
-        "bullishSolBoostPct": 10,
-        "bearishSolCutPct": 15
+        "bullishSolBoostPct": 16,
+        "bearishSolCutPct": 10
       },
 
-      "strongBuyRsi": 25,
+      "strongBuyRsi": 28,
       "strongBuyVwapPct": 4,
       "strongBuyTargetSolPct": 75,
 
-      "moderateBuyRsi": 43,
+      "moderateBuyRsi": 45,
       "moderateBuyVwapPct": 2,
       "moderateBuyTargetSolPct": 62,
 
@@ -38,26 +38,56 @@
       "moderateSellVwapFloorPct": 1,
       "moderateSellTargetSolPct": 38,
 
-      "strongSellRsi": 70,
+      "strongSellRsi": 76,
       "strongSellVwapPct": 2,
       "strongSellTargetSolPct": 25
     },
     "risk": {
-      "stopLossPct": 13,
-      "trailingStopActivationPct": 10,
-      "trailingStopPct": 5,
+      "stopLossPct": 15,
+      "trailingStopActivationPct": 12,
+      "trailingStopPct": 6,
       "circuitBreakerDrawdownPct": 30,
-      "maxSlippagePct": 2
+      "maxSlippagePct": 2,
+      "drawdownScaling": {
+        "enabled": true,
+        "scaleStartPct": 8,
+        "scaleFloorPct": 0.5,
+        "maxDrawdownPct": 30
+      },
+      "timeInDrawdown": {
+        "enabled": true,
+        "consecutiveBars": 5,
+        "scalePerBarPct": 0.03,
+        "maxScalePct": 0.25
+      }
     },
     "cooldown": {
       "candlesAfterExit": 3,
       "candleDurationMinutes": 240
     },
+    "volatility": {
+      "period": 14,
+      "lowThresholdPct": 3.0,
+      "highThresholdPct": 6.0,
+      "highVolTargetReductionPct": 2,
+      "highVolDriftMultiplier": 1.5
+    },
     "regime": {
-      "bearTargetMultiplier": 0.8,
-      "bearDriftOverridePct": 6,
+      "bearTargetMultiplier": 0.75,
+      "bearDriftOverridePct": 15,
       "bearModerateBuyRsiAdjustment": -4,
-      "bearExtraVwapDiscountPct": 2
+      "bearExtraVwapDiscountPct": 2.5,
+      "bearFloorSolPct": 30,
+      "bearBlockModerateBuy": true,
+      "bearHighVolTargetReductionPct": 5,
+      "bearStopLossPctOverride": 15,
+      "bearTrailingStopPctOverride": 6,
+      "bearRequireRsiStabilization": false,
+      "bearVwapDevPersistenceRequired": 0,
+      "bearStrongBuyRsiAdjustment": 0,
+      "bearStrongBuyExtraVwapDiscountPct": 0,
+      "bearRequiredBuyConfirmations": 1,
+      "bearNeutralTargetOverridePct": 45
     }
   },
   "capital": {
