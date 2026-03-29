@@ -1,0 +1,115 @@
+{
+  "strategy": {
+    "rsi": {
+      "period": 14
+    },
+    "vwap": {
+      "resetPeriod": "daily"
+    },
+    "sma": {
+      "period": 50,
+      "neutralZonePct": 3,
+      "trendHysteresisPct": 1.5
+    },
+    "rebalance": {
+      "bootstrapRsiThreshold": 62,
+      "driftThresholdPct": 12,
+      "minTradeUSDC": 3,
+
+      "buyConfirmationCandles": 1,
+      "sellConfirmationCandles": 1,
+
+      "trendAdjustment": {
+        "bullishSolBoostPct": 10,
+        "bearishSolCutPct": 15
+      },
+
+      "strongBuyRsi": 28,
+      "strongBuyVwapPct": 4,
+      "strongBuyTargetSolPct": 75,
+
+      "moderateBuyRsi": 43,
+      "moderateBuyVwapPct": 2,
+      "moderateBuyTargetSolPct": 62,
+
+      "neutralTargetSolPct": 50,
+
+      "moderateSellRsi": 62,
+      "moderateSellVwapFloorPct": 1,
+      "moderateSellTargetSolPct": 38,
+
+      "strongSellRsi": 76,
+      "strongSellVwapPct": 2,
+      "strongSellTargetSolPct": 25
+    },
+    "risk": {
+      "stopLossPct": 15,
+      "trailingStopActivationPct": 12,
+      "trailingStopPct": 6,
+      "circuitBreakerDrawdownPct": 30,
+      "maxSlippagePct": 2,
+      "drawdownScaling": {
+        "enabled": true,
+        "scaleStartPct": 8,
+        "scaleFloorPct": 0.5,
+        "maxDrawdownPct": 30
+      },
+      "timeInDrawdown": {
+        "enabled": true,
+        "consecutiveBars": 5,
+        "scalePerBarPct": 0.03,
+        "maxScalePct": 0.25
+      }
+    },
+    "cooldown": {
+      "candlesAfterExit": 3,
+      "candleDurationMinutes": 240
+    },
+    "volatility": {
+      "period": 14,
+      "lowThresholdPct": 3.0,
+      "highThresholdPct": 6.0,
+      "highVolTargetReductionPct": 8,
+      "highVolDriftMultiplier": 1.5
+    },
+    "regime": {
+      "bearTargetMultiplier": 0.75,
+      "bearDriftOverridePct": 15,
+      "bearModerateBuyRsiAdjustment": -4,
+      "bearExtraVwapDiscountPct": 2.5,
+      "bearFloorSolPct": 30,
+      "bearBlockModerateBuy": true,
+      "bearHighVolTargetReductionPct": 5,
+      "bearStopLossPctOverride": 15,
+      "bearTrailingStopPctOverride": 6,
+      "bearRequireRsiStabilization": false,
+      "bearVwapDevPersistenceRequired": 0,
+      "bearStrongBuyRsiAdjustment": 0,
+      "bearStrongBuyExtraVwapDiscountPct": 0,
+      "bearRequiredBuyConfirmations": 1,
+      "bearNeutralTargetOverridePct": 45
+    }
+  },
+  "capital": {
+    "startingCapitalUSDC": 77,
+    "minSolReserveForGas": 0.05
+  },
+  "timeframes": {
+    "executionTf": "4h",
+    "trendTf": "3d"
+  },
+  "network": {
+    "useDevnet": false,
+    "rpcEndpoint": "https://api.devnet.solana.com"
+  },
+  "notifications": {
+    "enabled": true,
+    "webhookUrl": "",
+    "type": "discord",
+    "botToken": ""
+  },
+  "scheduler": {
+    "cronExpression": "0 */2 * * *",
+    "alignToCandle": true
+  }
+}

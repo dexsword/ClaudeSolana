@@ -133,10 +133,40 @@ async function runTick(): Promise<void> {
     const price = await fetchPrice();
     console.log(`[Bot2] SOL price: $${price}`);
     
+    const balances = await walletManager.getBalances(price);
+    const solValue = balances.solBalance * price;
+    const usdcValue = balances.usdcBalance;
+    const totalValue = solValue + usdcValue;
+    const solPct = totalValue > 0 ? (solValue / totalValue) * 100 : 0;
+    console.log(`[Bot2] Wallet: ${balances.solBalance.toFixed(4)} SOL ($${solValue.toFixed(2)}) + $${usdcValue.toFixed(2)} USDC = $${totalValue.toFixed(2)} | SOL%: ${solPct.toFixed(1)}%`);
+    
     const candles = await fetchCandles(72);
     if (candles.length < 15) {
       console.log('[Bot2] Not enough candle data');
       return;
+    }
+    
+    const hasPosition = balances.solBalance > 0.1;
+    if (hasPosition && !position.inPosition) {
+      position = {
+        ...position,
+        inPosition: true,
+        entryPrice: price,
+        entryTime: Date.now(),
+        size: balances.solBalance,
+        pnlPct: 0,
+        trailingActive: false,
+        trailingPrice: null,
+        cooldownUntil: null,
+        tradesToday: 0,
+        lastTradeDate: new Date().toDateString(),
+        peakValue: totalValue,
+        currentValue: totalValue,
+      };
+      console.log('[Bot2] Detected existing position from wallet');
+    } else if (!hasPosition && position.inPosition) {
+      position = buildInitialBot2Position();
+      console.log('[Bot2] No position detected - reset state');
     }
     
     const signal = evaluateBot2Strategy(price, candles, position, cfg, Date.now());
@@ -152,9 +182,10 @@ async function runTick(): Promise<void> {
         return;
       }
       
-      console.log(`[Bot2] BUY ${tradeUsdc.toFixed(2)} USDC worth of SOL at $${price}`);
+      console.log(`[Bot2] BUY ${tradeUsdc.toFixed(2)} USDC worth of SOL at $${price} (dryRun=${dryRun})`);
       
       const result = await executor.buySol(tradeUsdc, dryRun, price);
+      console.log(`[Bot2] Buy result:`, result);
       if (result.success) {
         const txSig = result.txSignature ?? 'dry-run';
         await logger.logTrade({

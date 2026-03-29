@@ -1,0 +1,85 @@
+{
+  "strategy": {
+    "rsi": {
+      "period": 14
+    },
+    "vwap": {
+      "resetPeriod": "daily"
+    },
+    "sma": {
+      "period": 50,
+      "neutralZonePct": 3,
+      "trendHysteresisPct": 1.5
+    },
+    "rebalance": {
+      "bootstrapRsiThreshold": 62,
+      "driftThresholdPct": 9,
+      "minTradeUSDC": 3,
+
+      "buyConfirmationCandles": 1,
+      "sellConfirmationCandles": 2,
+
+      "trendAdjustment": {
+        "bullishSolBoostPct": 10,
+        "bearishSolCutPct": 15
+      },
+
+      "strongBuyRsi": 28,
+      "strongBuyVwapPct": 4,
+      "strongBuyTargetSolPct": 75,
+
+      "moderateBuyRsi": 43,
+      "moderateBuyVwapPct": 2,
+      "moderateBuyTargetSolPct": 62,
+
+      "neutralTargetSolPct": 50,
+
+      "moderateSellRsi": 62,
+      "moderateSellVwapFloorPct": 1,
+      "moderateSellTargetSolPct": 38,
+
+      "strongSellRsi": 76,
+      "strongSellVwapPct": 2,
+      "strongSellTargetSolPct": 25
+    },
+    "risk": {
+      "stopLossPct": 13,
+      "trailingStopActivationPct": 10,
+      "trailingStopPct": 5,
+      "circuitBreakerDrawdownPct": 30,
+      "maxSlippagePct": 2
+    },
+    "cooldown": {
+      "candlesAfterExit": 3,
+      "candleDurationMinutes": 240
+    },
+    "regime": {
+      "bearTargetMultiplier": 0.75,
+      "bearDriftOverridePct": 6,
+      "bearModerateBuyRsiAdjustment": -2,
+      "bearExtraVwapDiscountPct": 2
+    }
+  },
+  "capital": {
+    "startingCapitalUSDC": 77,
+    "minSolReserveForGas": 0.05
+  },
+  "timeframes": {
+    "executionTf": "4h",
+    "trendTf": "3d"
+  },
+  "network": {
+    "useDevnet": false,
+    "rpcEndpoint": "https://api.devnet.solana.com"
+  },
+  "notifications": {
+    "enabled": true,
+    "webhookUrl": "",
+    "type": "discord",
+    "botToken": ""
+  },
+  "scheduler": {
+    "cronExpression": "0 */2 * * *",
+    "alignToCandle": true
+  }
+}
