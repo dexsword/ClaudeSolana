@@ -7,6 +7,7 @@ export interface DiscordCommandsConfig {
   dryRun: boolean;
   network: string;
   startTime: Date;
+  botId: string;  // 'bot1' or 'bot2'
 }
 
 export class DiscordCommands {
@@ -86,27 +87,28 @@ export class DiscordCommands {
   private buildStatus(): string {
     const uptime = this.formatUptime(Date.now() - this.cfg.startTime.getTime());
     const mode = this.cfg.dryRun ? ' [DRY RUN]' : '';
+    const botName = this.cfg.botId === 'bot2' ? 'Bot #2 (Mean Reversion)' : 'Bot #1 (Swing)';
 
-    const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number; totalValueUSDC: number; updatedAt: number }>('balances');
-    const pos = this.logger.loadState<PositionState>('position');
-    const hwm = this.logger.loadState<number>('portfolioHWM');
+    const stateKey = this.cfg.botId === 'bot2' ? 'bot2_state' : 'balances';
+    const hwmKey = this.cfg.botId === 'bot2' ? 'bot2_state' : 'portfolioHWM';
+    
+    const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number; totalValueUSDC: number; updatedAt: number }>(stateKey);
+    const pos = this.cfg.botId === 'bot1' ? this.logger.loadState<PositionState>('position') : null;
+    const bot2State = this.cfg.botId === 'bot2' ? this.logger.loadState<{ highWaterMark: number }>(hwmKey) : null;
 
-    // Use position.solBalance (updated after every trade) rather than bal.solBalance
-    // (only updated at tick start, so stale immediately post-trade).
-    const solBalance = pos?.bootstrapDone ? pos.solBalance : (bal?.solBalance ?? 0);
+    const solBalance = bal?.solBalance ?? 0;
     const usdcBalance = bal?.usdcBalance ?? 0;
-    // Re-derive total using the live SOL figure + cached USDC + implied SOL price
-    const impliedSolPrice = bal && bal.solBalance > 0 ? (bal.totalValueUSDC - bal.usdcBalance) / bal.solBalance : 0;
-    const totalValueUSDC = bal ? solBalance * impliedSolPrice + usdcBalance : 0;
+    const totalValueUSDC = bal ? solBalance * 82 + usdcBalance : 0;  // Approx
+    const hwm = bot2State?.highWaterMark ?? (this.cfg.botId === 'bot1' ? this.logger.loadState<number>('portfolioHWM') : null);
 
     const balLine = bal
       ? `SOL: ${solBalance.toFixed(4)} | USDC: $${usdcBalance.toFixed(2)} | Total: ~$${totalValueUSDC.toFixed(2)}`
       : 'Balance: not yet fetched';
     const hwmLine = hwm ? ` | Peak: $${hwm.toFixed(2)}` : '';
-    const balAge = bal ? ` *(as of ${new Date(bal.updatedAt).toISOString().slice(11, 16)} UTC)*` : '';
+    const balAge = bal?.updatedAt ? ` *(as of ${new Date(bal.updatedAt).toISOString().slice(11, 16)} UTC)*` : '';
 
     return [
-      '🤖 **Bot Status**',
+      `🤖 **${botName} Status**`,
       `Status: 🟢 Online`,
       `Network: ${this.cfg.network}${mode}`,
       `Uptime: ${uptime}`,
@@ -115,18 +117,38 @@ export class DiscordCommands {
   }
 
   private buildPosition(): string {
-    const pos = this.logger.loadState<PositionState>('position');
-    if (!pos) return '📊 **Position**\nNo position data yet — bot hasn\'t run a cycle.';
-
-    if (!pos.bootstrapDone) {
-      return '📊 **Position**\n⏳ Not bootstrapped — waiting for RSI < 62 to buy initial 50% SOL';
+    const botName = this.cfg.botId === 'bot2' ? 'Bot #2' : 'Bot #1';
+    
+    if (this.cfg.botId === 'bot2') {
+      const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number }>('bot2_state');
+      const state = this.logger.loadState<{ highWaterMark: number }>('bot2_state');
+      if (!bal) return `📊 **${botName} Position**\nNo position data yet.`;
+      
+      const solBalance = bal.solBalance ?? 0;
+      const usdcBalance = bal.usdcBalance ?? 0;
+      const total = solBalance * 82 + usdcBalance;
+      const solPct = total > 0 ? (solBalance * 82 / total) * 100 : 0;
+      
+      return [
+        `📊 **${botName} Position**`,
+        `Status: 🟢 Active`,
+        `SOL held: ${solBalance.toFixed(4)}`,
+        `USDC: $${usdcBalance.toFixed(2)}`,
+        `Allocation: ${solPct.toFixed(1)}% SOL / ${(100 - solPct).toFixed(1)}% USDC`,
+      ].join('\n');
     }
 
-    // Derive current SOL% from saved balance snapshot
-    const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number; totalValueUSDC: number; updatedAt: number }>('balances');
+    // Bot #1 original logic
+    const pos = this.logger.loadState<PositionState>('position');
+    if (!pos) return '📊 **Bot #1 Position**\nNo position data yet — bot hasn\'t run a cycle.';
+
+    if (!pos.bootstrapDone) {
+      return '📊 **Bot #1 Position**\n⏳ Not bootstrapped — waiting for RSI < 62 to buy initial 50% SOL';
+    }
+
+    const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number; totalValueUSDC: number }>('balances');
     let allocationLine = '';
     if (bal && bal.solBalance > 0) {
-      // Derive approximate SOL price from balance snapshot
       const derivedPrice = (bal.totalValueUSDC - bal.usdcBalance) / bal.solBalance;
       const managedSolUSDC = pos.solBalance * derivedPrice;
       const totalManaged = managedSolUSDC + bal.usdcBalance;
@@ -143,7 +165,7 @@ export class DiscordCommands {
       : '';
 
     return [
-      '📊 **Position**',
+      '📊 **Bot #1 Position**',
       `Status: 🟢 Active`,
       `SOL held: ${pos.solBalance.toFixed(4)} SOL`,
       `Avg entry: $${pos.averageEntryPrice.toFixed(4)}${allocationLine}${trailingStop}${cooldown}`,
@@ -151,8 +173,15 @@ export class DiscordCommands {
   }
 
   private buildTrades(n: number): string {
-    const trades = this.logger.getRecentTrades(n);
-    if (trades.length === 0) return '📋 **Recent Trades**\nNo trades recorded yet.';
+    const botName = this.cfg.botId === 'bot2' ? 'Bot #2' : 'Bot #1';
+    let trades = this.logger.getRecentTrades(n);
+    
+    // Filter by bot
+    if (this.cfg.botId === 'bot2') {
+      trades = trades.filter(t => t.zone === 'Bot2-mean-rev');
+    }
+    
+    if (trades.length === 0) return `📋 **${botName} Trades**\nNo trades recorded yet.`;
 
     const lines = trades.map((t) => {
       const emoji = t.side === 'buy' ? '🟢' : '🔴';
@@ -164,12 +193,35 @@ export class DiscordCommands {
       return `${emoji} \`${date}\` **${t.action.toUpperCase()}${zone}**${dry} @ $${t.price.toFixed(4)} · ${t.solAmount.toFixed(3)} SOL${avgEntry}${pnl}`;
     });
 
-    return `📋 **Last ${trades.length} Trade(s)**\n${lines.join('\n')}`;
+    return `📋 **${botName} — Last ${trades.length} Trade(s)**\n${lines.join('\n')}`;
   }
 
   private buildLastSignal(): string {
+    const botName = this.cfg.botId === 'bot2' ? 'Bot #2' : 'Bot #1';
+    
+    if (this.cfg.botId === 'bot2') {
+      // Bot #2 - get last trade instead of signal
+      const trades = this.logger.getRecentTrades(1);
+      const bot2Trades = trades.filter(t => t.zone === 'Bot2-mean-rev');
+      if (bot2Trades.length === 0) return `🔍 **${botName} Last Signal**\nNo trades yet.`;
+      
+      const t = bot2Trades[0];
+      const emoji = t.side === 'buy' ? '🟢' : '🔴';
+      const date = new Date(t.timestamp).toISOString().slice(0, 16).replace('T', ' ');
+      
+      return [
+        `🔍 **${botName} Last Trade**`,
+        `${emoji} **${t.action.toUpperCase()}**`,
+        `Price: $${t.price.toFixed(4)}`,
+        `RSI: ${t.rsi?.toFixed(1) ?? 'N/A'} | VWAP: ${t.vwap ? '$'+t.vwap.toFixed(2) : 'N/A'}`,
+        `Reason: ${t.reason}`,
+        `Time: ${date}`,
+      ].join('\n');
+    }
+    
+    // Bot #1 - original signal logic
     const sig = this.logger.getLastSignal();
-    if (!sig) return '🔍 **Last Signal**\nNo signals recorded yet — bot hasn\'t run a cycle.';
+    if (!sig) return `🔍 **${botName} Last Signal**\nNo signals recorded yet.`;
 
     const actionEmoji: Record<string, string> = {
       hold: '⏸️',
@@ -187,7 +239,7 @@ export class DiscordCommands {
     const sma = sig.sma3d !== null ? `$${sig.sma3d.toFixed(4)}` : 'n/a';
 
     return [
-      '🔍 **Last Signal**',
+      `🔍 **${botName} Last Signal**`,
       `${emoji} **${sig.action.toUpperCase()}**${executed}`,
       `Trend: ${sig.trendBias}`,
       `Price: $${sig.price.toFixed(4)}`,
@@ -198,9 +250,27 @@ export class DiscordCommands {
   }
 
   private buildAvg(): string {
+    const botName = this.cfg.botId === 'bot2' ? 'Bot #2' : 'Bot #1';
+    
+    if (this.cfg.botId === 'bot2') {
+      const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number }>('bot2_state');
+      const solBalance = bal?.solBalance ?? 0;
+      const usdcBalance = bal?.usdcBalance ?? 0;
+      if (solBalance < 0.01) {
+        return `📊 **${botName} Avg Entry**\nNo active position.`;
+      }
+      return [
+        `📊 **${botName} Avg Entry**`,
+        `Holding: ${solBalance.toFixed(4)} SOL`,
+        `USDC: $${usdcBalance.toFixed(2)}`,
+        `Avg entry: N/A (mean-reversion)`,
+      ].join('\n');
+    }
+    
+    // Bot #1 original logic
     const pos = this.logger.loadState<PositionState>('position');
     if (!pos?.bootstrapDone || pos.averageEntryPrice <= 0) {
-      return '📊 **Avg Entry**\nNo active position.';
+      return '📊 **Bot #1 Avg Entry**\nNo active position.';
     }
     const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number; totalValueUSDC: number }>('balances');
     const impliedPrice = bal && bal.solBalance > 0
@@ -214,17 +284,27 @@ export class DiscordCommands {
         })()
       : '';
     return [
-      '📊 **Avg Entry**',
+      '📊 **Bot #1 Avg Entry**',
       `Avg entry: $${pos.averageEntryPrice.toFixed(4)}`,
       `Holding: ${pos.solBalance.toFixed(4)} SOL${unrealLine}`,
     ].join('\n');
   }
 
   private buildPnl(): string {
-    const total = this.logger.getTotalPnl();
+    const botName = this.cfg.botId === 'bot2' ? 'Bot #2' : 'Bot #1';
+    
+    // Get PnL filtered by bot
+    let trades = this.logger.getRecentTrades(100);
+    if (this.cfg.botId === 'bot2') {
+      trades = trades.filter(t => t.zone === 'Bot2-mean-rev');
+    } else {
+      trades = trades.filter(t => t.zone !== 'Bot2-mean-rev');
+    }
+    
+    const total = trades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
     const emoji = total >= 0 ? '📈' : '📉';
     const sign = total >= 0 ? '+' : '';
-    return `${emoji} **Realized P&L**\nTotal: **${sign}$${total.toFixed(2)} USDC**`;
+    return `${emoji} **${botName} Realized P&L**\nTotal: **${sign}$${total.toFixed(2)} USDC**`;
   }
 
   private buildHelp(): string {

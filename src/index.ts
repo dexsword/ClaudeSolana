@@ -66,6 +66,7 @@ if (discordBotToken) {
       dryRun,
       network: cfg.network.useDevnet ? 'DEVNET' : 'MAINNET',
       startTime,
+      botId: 'bot1',
     },
     logger,
   );

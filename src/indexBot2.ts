@@ -52,7 +52,7 @@ let discordCommands: DiscordCommands | null = null;
 
 if (discordBotToken) {
   discordCommands = new DiscordCommands(
-    { botToken: discordBotToken, dryRun, network: 'MAINNET', startTime },
+    { botToken: discordBotToken, dryRun, network: 'MAINNET', startTime, botId: 'bot2' },
     logger,
   );
   discordCommands.start().catch((err) => {
