@@ -12,6 +12,9 @@
     "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts",
     "backtest": "npx ts-node src/backtest.ts",
+    "backtest-bot2": "npx ts-node src/backtestBot2.ts",
+    "walkforward-bot2": "npx ts-node src/walkforwardBot2.ts",
+    "optimize-bot2": "npx ts-node src/optimizeBot2.ts",
     "optimize": "npx ts-node src/optimize.ts"
   },
   "dependencies": {
