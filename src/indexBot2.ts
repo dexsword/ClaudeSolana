@@ -70,6 +70,7 @@ interface Candle {
 }
 
 let position = buildInitialBot2Position();
+let botState = logger.loadState<{ highWaterMark: number }>('bot2_state') ?? { highWaterMark: 0 };
 
 async function fetchPrice(): Promise<number> {
   const { data } = await axios.get('https://min-api.cryptocompare.com/data/price', {
@@ -138,7 +139,14 @@ async function runTick(): Promise<void> {
     const usdcValue = balances.usdcBalance;
     const totalValue = solValue + usdcValue;
     const solPct = totalValue > 0 ? (solValue / totalValue) * 100 : 0;
-    console.log(`[Bot2] Wallet: ${balances.solBalance.toFixed(4)} SOL ($${solValue.toFixed(2)}) + $${usdcValue.toFixed(2)} USDC = $${totalValue.toFixed(2)} | SOL%: ${solPct.toFixed(1)}%`);
+    
+    // Track high water mark
+    if (totalValue > botState.highWaterMark) {
+      botState.highWaterMark = totalValue;
+      logger.saveState('bot2_state', botState);
+    }
+    const pnlFromHigh = totalValue - botState.highWaterMark;
+    console.log(`[Bot2] Wallet: ${balances.solBalance.toFixed(4)} SOL ($${solValue.toFixed(2)}) + $${usdcValue.toFixed(2)} USDC = $${totalValue.toFixed(2)} | SOL%: ${solPct.toFixed(1)}% | High: $${botState.highWaterMark.toFixed(2)} | PnL: ${pnlFromHigh >= 0 ? '+' : ''}$${pnlFromHigh.toFixed(2)}`);
     
     const candles = await fetchCandles(72);
     if (candles.length < 15) {
@@ -147,6 +155,24 @@ async function runTick(): Promise<void> {
     }
     
     const hasPosition = balances.solBalance > 0.1;
+    const targetSolPct = 30;
+    const currentSolPct = totalValue > 0 ? (solValue / totalValue) * 100 : 0;
+    
+    if (hasPosition && !position.inPosition) {
+      // Bootstrap: if SOL % is too high, sell down to target
+      if (currentSolPct > targetSolPct + 5) {
+        const excessSol = balances.solBalance - (totalValue * (targetSolPct / 100) / price);
+        if (excessSol > 0.1) {
+          console.log(`[Bot2] Bootstrap: Selling excess SOL (${excessSol.toFixed(4)}) to reach ${targetSolPct}% target`);
+          const result = await executor.sellSol(excessSol, dryRun, price);
+          if (result.success) {
+            console.log(`[Bot2] Bootstrap sell result:`, result);
+          }
+          return; // Exit tick after bootstrap sell
+        }
+      }
+    }
+    
     if (hasPosition && !position.inPosition) {
       position = {
         ...position,
