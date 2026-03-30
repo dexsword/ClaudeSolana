@@ -70,7 +70,7 @@ interface Candle {
 }
 
 let position = buildInitialBot2Position();
-let botState = logger.loadState<{ highWaterMark: number }>('bot2_state') ?? { highWaterMark: 0 };
+let botState = logger.loadState<{ highWaterMark: number; solBalance: number; usdcBalance: number }>('bot2_state') ?? { highWaterMark: 0, solBalance: 0, usdcBalance: 0 };
 
 async function fetchPrice(): Promise<number> {
   const { data } = await axios.get('https://min-api.cryptocompare.com/data/price', {
@@ -140,11 +140,13 @@ async function runTick(): Promise<void> {
     const totalValue = solValue + usdcValue;
     const solPct = totalValue > 0 ? (solValue / totalValue) * 100 : 0;
     
-    // Track high water mark
+    // Track high water mark and save balances
     if (totalValue > botState.highWaterMark) {
       botState.highWaterMark = totalValue;
-      logger.saveState('bot2_state', botState);
     }
+    botState.solBalance = balances.solBalance;
+    botState.usdcBalance = balances.usdcBalance;
+    logger.saveState('bot2_state', botState);
     const pnlFromHigh = totalValue - botState.highWaterMark;
     console.log(`[Bot2] Wallet: ${balances.solBalance.toFixed(4)} SOL ($${solValue.toFixed(2)}) + $${usdcValue.toFixed(2)} USDC = $${totalValue.toFixed(2)} | SOL%: ${solPct.toFixed(1)}% | High: $${botState.highWaterMark.toFixed(2)} | PnL: ${pnlFromHigh >= 0 ? '+' : ''}$${pnlFromHigh.toFixed(2)}`);
     

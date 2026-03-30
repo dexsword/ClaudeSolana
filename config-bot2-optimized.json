@@ -9,7 +9,7 @@
         "oversold": 30,
         "overbought": 70,
         "exitOversold": 30,
-        "exitOverbought": 55
+        "exitOverbought": 60
       },
       "vwap": {
         "anchor": "session",
@@ -33,13 +33,13 @@
       },
       "exit": {
         "profitTargetPct": 1,
-        "stopLossPct": 2.5,
+        "stopLossPct": 3,
         "trailingStopPct": 1,
         "trailingActivationPct": 1.5,
         "maxHoldMinutes": 60
       },
       "position": {
-        "maxPositionPct": 15,
+        "maxPositionPct": 30,
         "minTradeUSDC": 5,
         "pyramidingEnabled": false
       },
