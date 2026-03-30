@@ -15,6 +15,7 @@
     "backtest-bot2": "npx ts-node src/backtestBot2.ts",
     "walkforward-bot2": "npx ts-node src/walkforwardBot2.ts",
     "optimize-bot2": "npx ts-node src/optimizeBot2.ts",
+    "timeframe-eval": "npx ts-node src/timeframeEvalBot2.ts",
     "optimize": "npx ts-node src/optimize.ts"
   },
   "dependencies": {
