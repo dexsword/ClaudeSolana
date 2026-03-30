@@ -120,21 +120,24 @@ export class DiscordCommands {
     const botName = this.cfg.botId === 'bot2' ? 'Bot #2' : 'Bot #1';
     
     if (this.cfg.botId === 'bot2') {
-      const bal = this.logger.loadState<{ solBalance: number; usdcBalance: number }>('bot2_state');
-      const state = this.logger.loadState<{ highWaterMark: number }>('bot2_state');
-      if (!bal) return `📊 **${botName} Position**\nNo position data yet.`;
+      const state = this.logger.loadState<{ highWaterMark: number; solBalance: number; usdcBalance: number }>('bot2_state');
+      if (!state) return `📊 **${botName} Position**\nNo position data yet.`;
       
-      const solBalance = bal.solBalance ?? 0;
-      const usdcBalance = bal.usdcBalance ?? 0;
-      const total = solBalance * 82 + usdcBalance;
-      const solPct = total > 0 ? (solBalance * 82 / total) * 100 : 0;
+      const solBalance = state.solBalance ?? 0;
+      const usdcBalance = state.usdcBalance ?? 0;
+      const hwm = state.highWaterMark ?? 0;
+      const currentPrice = 82; // Approx
+      const total = solBalance * currentPrice + usdcBalance;
+      const solPct = total > 0 ? (solBalance * currentPrice / total) * 100 : 0;
+      const pnl = total - hwm;
+      const pnlLine = hwm > 0 ? `\nPnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (Peak: $${hwm.toFixed(2)})` : '';
       
       return [
         `📊 **${botName} Position**`,
         `Status: 🟢 Active`,
         `SOL held: ${solBalance.toFixed(4)}`,
         `USDC: $${usdcBalance.toFixed(2)}`,
-        `Allocation: ${solPct.toFixed(1)}% SOL / ${(100 - solPct).toFixed(1)}% USDC`,
+        `Allocation: ${solPct.toFixed(1)}% SOL / ${(100 - solPct).toFixed(1)}% USDC${pnlLine}`,
       ].join('\n');
     }
 
@@ -310,11 +313,9 @@ export class DiscordCommands {
   private buildHelp(): string {
     return [
       '**SolBot Commands**',
-      '`!solbot status` — online status, network, uptime, wallet balances',
-      '`!solbot position` — SOL allocation, avg entry, trailing stop',
-      '`!solbot last` — last signal (zone, RSI, VWAP, reason)',
+      '`!solbot status` — online status, balances, high water mark',
+      '`!solbot position` — current SOL/USDC allocation',
       '`!solbot trades [n]` — last N trades (default 5, max 20)',
-      '`!solbot avg` — current avg entry price + unrealized P&L',
       '`!solbot pnl` — total realized P&L',
       '`!solbot help` — this message',
     ].join('\n');
