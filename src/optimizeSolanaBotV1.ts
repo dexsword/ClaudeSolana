@@ -2,8 +2,8 @@ import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fetchCryptoCompareCandlesAggregatedMinutes } from './cryptoCompare';
-import { Bot2Config } from './typesBot2';
-import { BacktestCandle, runBot2Backtest } from './bot2BacktestEngine';
+import { SolanaBotV1Config } from './typesSolanaBotV1';
+import { BacktestCandle, runSolanaBotV1Backtest } from './solanaBotV1BacktestEngine';
 
 const CC_KEY = process.env.CRYPTOCOMPARE_API_KEY ?? '';
 const SLIPPAGE = 0.002;
@@ -27,12 +27,12 @@ interface OptimizerResult {
   maxDrawdown: number;
 }
 
-function cloneConfig(cfg: Bot2Config): Bot2Config {
+function cloneConfig(cfg: SolanaBotV1Config): SolanaBotV1Config {
   return JSON.parse(JSON.stringify(cfg));
 }
 
-function runBacktest(candles: BacktestCandle[], cfg: Bot2Config): { ret: number; trades: number; winRate: number; maxDrawdown: number } {
-  const result = runBot2Backtest(candles, cfg, {
+function runBacktest(candles: BacktestCandle[], cfg: SolanaBotV1Config): { ret: number; trades: number; winRate: number; maxDrawdown: number } {
+  const result = runSolanaBotV1Backtest(candles, cfg, {
     startingCapitalUSDC: CAPITAL,
     slippagePct: SLIPPAGE,
     feePct: FEE,
@@ -47,7 +47,7 @@ function runBacktest(candles: BacktestCandle[], cfg: Bot2Config): { ret: number;
 }
 
 async function main() {
-  console.log('Bot #2 - Parameter Optimization');
+  console.log('SolanaBotV1 - Parameter Optimization');
   console.log('='.repeat(60));
   console.log('');
 
@@ -60,7 +60,7 @@ async function main() {
   const END_MS = Date.now();
 
   console.log('Fetching candles...');
-  let candles: import('./bot2BacktestEngine').BacktestCandle[];
+  let candles: import('./solanaBotV1BacktestEngine').BacktestCandle[];
   try {
     candles = await fetchCryptoCompareCandlesAggregatedMinutes({
       fsym: 'SOL',
@@ -90,8 +90,8 @@ async function main() {
   console.log(`Total 15m candles: ${candles.length}`);
   console.log('');
 
-  const baseCfg: Bot2Config = JSON.parse(
-    fs.readFileSync(path.join(__dirname, '../config-bot2.json'), 'utf-8')
+  const baseCfg: SolanaBotV1Config = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '../config-solana-bot-v1.json'), 'utf-8')
   );
 
   const paramGrid = {
@@ -123,14 +123,14 @@ async function main() {
                   count++;
 
                   const cfg = cloneConfig(baseCfg);
-                  cfg.bot2.strategy.rsi.period = rsiPeriod;
-                  cfg.bot2.strategy.rsi.oversold = rsiOversold;
-                  cfg.bot2.strategy.rsi.exitOversold = rsiExitOversold;
-                  cfg.bot2.strategy.rsi.exitOverbought = rsiExitOverbought;
-                  cfg.bot2.strategy.entry.minDeviationPct = minDeviationPct;
-                  cfg.bot2.strategy.exit.profitTargetPct = profitTarget;
-                  cfg.bot2.strategy.exit.stopLossPct = stopLoss;
-                  cfg.bot2.risk.cooldownMinutes = cooldownMinutes;
+                  cfg.solanaBotV1.strategy.rsi.period = rsiPeriod;
+                  cfg.solanaBotV1.strategy.rsi.oversold = rsiOversold;
+                  cfg.solanaBotV1.strategy.rsi.exitOversold = rsiExitOversold;
+                  cfg.solanaBotV1.strategy.rsi.exitOverbought = rsiExitOverbought;
+                  cfg.solanaBotV1.strategy.entry.minDeviationPct = minDeviationPct;
+                  cfg.solanaBotV1.strategy.exit.profitTargetPct = profitTarget;
+                  cfg.solanaBotV1.strategy.exit.stopLossPct = stopLoss;
+                  cfg.solanaBotV1.risk.cooldownMinutes = cooldownMinutes;
 
                   const { ret, trades, winRate, maxDrawdown } = runBacktest(candles, cfg);
 
@@ -175,20 +175,20 @@ async function main() {
   console.log('');
 
   const bestCfg = cloneConfig(baseCfg);
-  bestCfg.bot2.strategy.rsi.period = best.params.rsiPeriod;
-  bestCfg.bot2.strategy.rsi.oversold = best.params.rsiOversold;
-  bestCfg.bot2.strategy.rsi.exitOversold = best.params.rsiExitOversold;
-  bestCfg.bot2.strategy.rsi.exitOverbought = best.params.rsiExitOverbought;
-  bestCfg.bot2.strategy.entry.minDeviationPct = best.params.minDeviationPct;
-  bestCfg.bot2.strategy.exit.profitTargetPct = best.params.profitTarget;
-  bestCfg.bot2.strategy.exit.stopLossPct = best.params.stopLoss;
-  bestCfg.bot2.risk.cooldownMinutes = best.params.cooldownMinutes;
+  bestCfg.solanaBotV1.strategy.rsi.period = best.params.rsiPeriod;
+  bestCfg.solanaBotV1.strategy.rsi.oversold = best.params.rsiOversold;
+  bestCfg.solanaBotV1.strategy.rsi.exitOversold = best.params.rsiExitOversold;
+  bestCfg.solanaBotV1.strategy.rsi.exitOverbought = best.params.rsiExitOverbought;
+  bestCfg.solanaBotV1.strategy.entry.minDeviationPct = best.params.minDeviationPct;
+  bestCfg.solanaBotV1.strategy.exit.profitTargetPct = best.params.profitTarget;
+  bestCfg.solanaBotV1.strategy.exit.stopLossPct = best.params.stopLoss;
+  bestCfg.solanaBotV1.risk.cooldownMinutes = best.params.cooldownMinutes;
 
   fs.writeFileSync(
-    path.join(__dirname, '../config-bot2-optimized.json'),
+    path.join(__dirname, '../config-solana-bot-v1-optimized.json'),
     JSON.stringify(bestCfg, null, 2)
   );
-  console.log('Saved optimized config to config-bot2-optimized.json');
+  console.log('Saved optimized config to config-solana-bot-v1-optimized.json');
 }
 
 main().catch(console.error);

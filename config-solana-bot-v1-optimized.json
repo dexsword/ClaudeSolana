@@ -1,5 +1,5 @@
 {
-  "bot2": {
+  "solanaBotV1": {
     "enabled": true,
     "name": "sol-mean-reversion",
     "timeframe": "15m",

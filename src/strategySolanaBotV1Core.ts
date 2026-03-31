@@ -1,8 +1,8 @@
-import { Bot2Config, Bot2Position } from './typesBot2';
+import { SolanaBotV1Config, SolanaBotV1Position } from './typesSolanaBotV1';
 
-export type Bot2Action = 'buy' | 'sell' | 'hold';
+export type SolanaBotV1Action = 'buy' | 'sell' | 'hold';
 
-export interface Bot2CoreInputs {
+export interface SolanaBotV1CoreInputs {
   price: number;
   nowMs: number;
 
@@ -19,8 +19,8 @@ export interface Bot2CoreInputs {
   prevHtfEma: number | null;
 }
 
-export interface Bot2CoreResult {
-  action: Bot2Action;
+export interface SolanaBotV1CoreResult {
+  action: SolanaBotV1Action;
   reason: string;
 }
 
@@ -36,11 +36,15 @@ function pct(a: number, b: number): number {
 }
 
 /**
- * Bot2 core decision logic.
+ * SolanaBotV1 core decision logic.
  * Designed to be used by both live bot and backtests.
  */
-export function evaluateBot2Core(inputs: Bot2CoreInputs, position: Bot2Position, cfg: Bot2Config): Bot2CoreResult {
-  const s = cfg.bot2.strategy;
+export function evaluateSolanaBotV1Core(
+  inputs: SolanaBotV1CoreInputs,
+  position: SolanaBotV1Position,
+  cfg: SolanaBotV1Config,
+): SolanaBotV1CoreResult {
+  const s = cfg.solanaBotV1.strategy;
   const mode = s.mode ?? 'mean_reversion';
   const { price, nowMs, rsi, prevRsi, vwap, atrPercent, ema, prevEma, htfEma, prevHtfEma } = inputs;
 

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { StrategySignal, TradeRecord } from './types';
+import { StrategySignal, TradeRecord } from './sharedTypes';
 
 export interface NotificationConfig {
   enabled: boolean;

@@ -1,9 +1,9 @@
 import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Bot2Config } from './typesBot2';
+import { SolanaBotV1Config } from './typesSolanaBotV1';
 import { fetchCryptoCompareHourlyCandlesRange, fetchCryptoCompareCandlesAggregatedMinutes } from './cryptoCompare';
-import { BacktestCandle, runBot2Backtest } from './bot2BacktestEngine';
+import { BacktestCandle, runSolanaBotV1Backtest } from './solanaBotV1BacktestEngine';
 
 const CC_KEY = process.env.CRYPTOCOMPARE_API_KEY ?? '';
 const DEFAULT_SLIPPAGE = 0.002;
@@ -13,8 +13,8 @@ const CAPITAL = 100;
 type FoldResult = {
   trainPeriod: string;
   valPeriod: string;
-  train: ReturnType<typeof runBot2Backtest>['metrics'];
-  val: ReturnType<typeof runBot2Backtest>['metrics'];
+  train: ReturnType<typeof runSolanaBotV1Backtest>['metrics'];
+  val: ReturnType<typeof runSolanaBotV1Backtest>['metrics'];
   params: {
     mode: string;
     rsiPeriod: number;
@@ -34,7 +34,7 @@ type FoldResult = {
   } | null;
 };
 
-function cloneConfig(cfg: Bot2Config): Bot2Config {
+function cloneConfig(cfg: SolanaBotV1Config): SolanaBotV1Config {
   return JSON.parse(JSON.stringify(cfg));
 }
 
@@ -59,11 +59,11 @@ function pick<T>(arr: T[], rnd: () => number): T {
 
 function optimizeOnTraining(
   candles: BacktestCandle[],
-  baseCfg: Bot2Config,
+  baseCfg: SolanaBotV1Config,
   costs: { slippagePct: number; feePct: number },
   samples: number,
   seed: number,
-): { bestCfg: Bot2Config; bestMetrics: ReturnType<typeof runBot2Backtest>['metrics']; bestParams: FoldResult['params'] } {
+): { bestCfg: SolanaBotV1Config; bestMetrics: ReturnType<typeof runSolanaBotV1Backtest>['metrics']; bestParams: FoldResult['params'] } {
   const ranges = {
     mode: ['mean_reversion', 'trend_pullback', 'regime_switch'] as const,
     rsiPeriod: [6, 8, 10, 14],
@@ -90,23 +90,23 @@ function optimizeOnTraining(
 
   let bestScore = -Infinity;
   let bestCfg = baseCfg;
-  let bestMetrics = runBot2Backtest(candles, baseCfg, { startingCapitalUSDC: CAPITAL, slippagePct: costs.slippagePct, feePct: costs.feePct }).metrics;
+  let bestMetrics = runSolanaBotV1Backtest(candles, baseCfg, { startingCapitalUSDC: CAPITAL, slippagePct: costs.slippagePct, feePct: costs.feePct }).metrics;
   let bestParams: FoldResult['params'] = {
-    mode: baseCfg.bot2.strategy.mode ?? 'mean_reversion',
-    rsiPeriod: baseCfg.bot2.strategy.rsi.period,
-    rsiOversold: baseCfg.bot2.strategy.rsi.oversold,
-    rsiExitOversold: baseCfg.bot2.strategy.rsi.exitOversold,
-    minDeviationPct: baseCfg.bot2.strategy.entry.minDeviationPct,
-    profitTarget: baseCfg.bot2.strategy.exit.profitTargetPct,
-    stopLoss: baseCfg.bot2.strategy.exit.stopLossPct,
-    rsiOverbought: baseCfg.bot2.strategy.rsi.overbought,
-    rsiExitOverbought: baseCfg.bot2.strategy.rsi.exitOverbought,
-    cooldownMinutes: baseCfg.bot2.risk.cooldownMinutes,
-    emaPeriod: baseCfg.bot2.strategy.trendFilter.emaPeriod,
-    disableBelowPct: baseCfg.bot2.strategy.trendFilter.disableBelowPct,
-    disableAbovePct: baseCfg.bot2.strategy.trendFilter.disableAbovePct,
-    maxHoldMinutes: baseCfg.bot2.strategy.exit.maxHoldMinutes,
-    vwapMaxDev: baseCfg.bot2.strategy.vwap.deviationThresholdPct,
+    mode: baseCfg.solanaBotV1.strategy.mode ?? 'mean_reversion',
+    rsiPeriod: baseCfg.solanaBotV1.strategy.rsi.period,
+    rsiOversold: baseCfg.solanaBotV1.strategy.rsi.oversold,
+    rsiExitOversold: baseCfg.solanaBotV1.strategy.rsi.exitOversold,
+    minDeviationPct: baseCfg.solanaBotV1.strategy.entry.minDeviationPct,
+    profitTarget: baseCfg.solanaBotV1.strategy.exit.profitTargetPct,
+    stopLoss: baseCfg.solanaBotV1.strategy.exit.stopLossPct,
+    rsiOverbought: baseCfg.solanaBotV1.strategy.rsi.overbought,
+    rsiExitOverbought: baseCfg.solanaBotV1.strategy.rsi.exitOverbought,
+    cooldownMinutes: baseCfg.solanaBotV1.risk.cooldownMinutes,
+    emaPeriod: baseCfg.solanaBotV1.strategy.trendFilter.emaPeriod,
+    disableBelowPct: baseCfg.solanaBotV1.strategy.trendFilter.disableBelowPct,
+    disableAbovePct: baseCfg.solanaBotV1.strategy.trendFilter.disableAbovePct,
+    maxHoldMinutes: baseCfg.solanaBotV1.strategy.exit.maxHoldMinutes,
+    vwapMaxDev: baseCfg.solanaBotV1.strategy.vwap.deviationThresholdPct,
   };
 
   for (let i = 0; i < samples; i++) {
@@ -131,34 +131,34 @@ function optimizeOnTraining(
     const exitBuffer = pick(ranges.exitBuffer, rnd);
 
     const cfg = cloneConfig(baseCfg);
-    cfg.bot2.strategy.mode = mode as 'mean_reversion' | 'trend_pullback' | 'regime_switch' | 'trend';
+    cfg.solanaBotV1.strategy.mode = mode as 'mean_reversion' | 'trend_pullback' | 'regime_switch' | 'trend';
 
-    cfg.bot2.strategy.regimeFilter = cfg.bot2.strategy.regimeFilter ?? {
+    cfg.solanaBotV1.strategy.regimeFilter = cfg.solanaBotV1.strategy.regimeFilter ?? {
       enabled: true,
       emaPeriodDays: 200,
       requireAboveEma: true,
       requireEmaSlopeUp: false,
     };
-    cfg.bot2.strategy.regimeFilter.enabled = mode === 'regime_switch';
-    cfg.bot2.strategy.regimeFilter.emaPeriodDays = regimeEmaDays;
-    cfg.bot2.strategy.regimeFilter.entryBufferPct = entryBuffer;
-    cfg.bot2.strategy.regimeFilter.exitBufferPct = exitBuffer;
-    cfg.bot2.strategy.rsi.period = rsiPeriod;
-    cfg.bot2.strategy.rsi.oversold = rsiOversold;
-    cfg.bot2.strategy.rsi.exitOversold = rsiExitOversold;
-    cfg.bot2.strategy.rsi.exitOverbought = rsiExitOverbought;
-    cfg.bot2.strategy.rsi.overbought = rsiOverbought;
-    cfg.bot2.strategy.vwap.deviationThresholdPct = vwapMaxDev;
-    cfg.bot2.strategy.entry.minDeviationPct = minDeviationPct;
-    cfg.bot2.strategy.exit.profitTargetPct = profitTarget;
-    cfg.bot2.strategy.exit.stopLossPct = stopLoss;
-    cfg.bot2.risk.cooldownMinutes = cooldownMinutes;
-    cfg.bot2.strategy.trendFilter.emaPeriod = emaPeriod;
-    cfg.bot2.strategy.trendFilter.disableBelowPct = disableBelowPct;
-    cfg.bot2.strategy.trendFilter.disableAbovePct = disableAbovePct;
-    cfg.bot2.strategy.exit.maxHoldMinutes = maxHoldMinutes;
+    cfg.solanaBotV1.strategy.regimeFilter.enabled = mode === 'regime_switch';
+    cfg.solanaBotV1.strategy.regimeFilter.emaPeriodDays = regimeEmaDays;
+    cfg.solanaBotV1.strategy.regimeFilter.entryBufferPct = entryBuffer;
+    cfg.solanaBotV1.strategy.regimeFilter.exitBufferPct = exitBuffer;
+    cfg.solanaBotV1.strategy.rsi.period = rsiPeriod;
+    cfg.solanaBotV1.strategy.rsi.oversold = rsiOversold;
+    cfg.solanaBotV1.strategy.rsi.exitOversold = rsiExitOversold;
+    cfg.solanaBotV1.strategy.rsi.exitOverbought = rsiExitOverbought;
+    cfg.solanaBotV1.strategy.rsi.overbought = rsiOverbought;
+    cfg.solanaBotV1.strategy.vwap.deviationThresholdPct = vwapMaxDev;
+    cfg.solanaBotV1.strategy.entry.minDeviationPct = minDeviationPct;
+    cfg.solanaBotV1.strategy.exit.profitTargetPct = profitTarget;
+    cfg.solanaBotV1.strategy.exit.stopLossPct = stopLoss;
+    cfg.solanaBotV1.risk.cooldownMinutes = cooldownMinutes;
+    cfg.solanaBotV1.strategy.trendFilter.emaPeriod = emaPeriod;
+    cfg.solanaBotV1.strategy.trendFilter.disableBelowPct = disableBelowPct;
+    cfg.solanaBotV1.strategy.trendFilter.disableAbovePct = disableAbovePct;
+    cfg.solanaBotV1.strategy.exit.maxHoldMinutes = maxHoldMinutes;
 
-    const res = runBot2Backtest(candles, cfg, { startingCapitalUSDC: CAPITAL, slippagePct: costs.slippagePct, feePct: costs.feePct });
+    const res = runSolanaBotV1Backtest(candles, cfg, { startingCapitalUSDC: CAPITAL, slippagePct: costs.slippagePct, feePct: costs.feePct });
     if (res.metrics.closedTrades < 10) continue;
 
     const s = scoreMetrics(res.metrics);
@@ -183,7 +183,7 @@ function optimizeOnTraining(
         maxHoldMinutes,
         vwapMaxDev,
 
-        // regime params are derived from cfg.bot2.strategy.regimeFilter
+        // regime params are derived from cfg.solanaBotV1.strategy.regimeFilter
       };
     }
   }
@@ -192,7 +192,7 @@ function optimizeOnTraining(
 }
 
 async function main(): Promise<void> {
-  console.log('Bot #2 - Walk-Forward Optimization (15m)');
+  console.log('SolanaBotV1 - Walk-Forward Optimization (15m)');
   console.log('='.repeat(70));
 
   if (!CC_KEY) {
@@ -214,10 +214,10 @@ async function main(): Promise<void> {
   const days = daysArg ? Math.max(30, parseInt(daysArg, 10)) : 365;
   const samples = samplesArg ? Math.max(50, parseInt(samplesArg, 10)) : 160;
 
-  const baseCfg: Bot2Config = JSON.parse(
-    fs.readFileSync(path.join(__dirname, '../config-bot2.json'), 'utf-8'),
+  const baseCfg: SolanaBotV1Config = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '../config-solana-bot-v1.json'), 'utf-8'),
   );
-  baseCfg.bot2.timeframe = timeframe;
+  baseCfg.solanaBotV1.timeframe = timeframe;
 
   const END_MS = Date.now();
 
@@ -303,11 +303,11 @@ async function main(): Promise<void> {
 
     const seed = 10_000 + start;
     const opt: {
-      bestCfg: Bot2Config;
-      bestMetrics: ReturnType<typeof runBot2Backtest>['metrics'];
+      bestCfg: SolanaBotV1Config;
+      bestMetrics: ReturnType<typeof runSolanaBotV1Backtest>['metrics'];
       bestParams: FoldResult['params'] | null;
     } = noOpt
-      ? { bestCfg: baseCfg, bestMetrics: runBot2Backtest(trainCandles, baseCfg, { startingCapitalUSDC: CAPITAL, slippagePct, feePct }).metrics, bestParams: null }
+      ? { bestCfg: baseCfg, bestMetrics: runSolanaBotV1Backtest(trainCandles, baseCfg, { startingCapitalUSDC: CAPITAL, slippagePct, feePct }).metrics, bestParams: null }
       : optimizeOnTraining(
           trainCandles,
           baseCfg,
@@ -319,7 +319,7 @@ async function main(): Promise<void> {
     const bestCfg = opt.bestCfg;
     const trainMetrics = opt.bestMetrics;
     const bestParams = opt.bestParams;
-    const valResult = runBot2Backtest(valCandles, bestCfg, { startingCapitalUSDC: CAPITAL, slippagePct, feePct });
+    const valResult = runSolanaBotV1Backtest(valCandles, bestCfg, { startingCapitalUSDC: CAPITAL, slippagePct, feePct });
 
     const trainPeriod = `${new Date(trainCandles[0].timestamp).toISOString().slice(0, 10)}-${new Date(trainCandles[trainCandles.length - 1].timestamp).toISOString().slice(0, 10)}`;
     const valPeriod = `${new Date(valCandles[0].timestamp).toISOString().slice(0, 10)}-${new Date(valCandles[valCandles.length - 1].timestamp).toISOString().slice(0, 10)}`;

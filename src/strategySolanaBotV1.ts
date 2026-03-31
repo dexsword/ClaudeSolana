@@ -1,5 +1,5 @@
-import { Bot2Config, Bot2Signal, Bot2Position, Candle } from './typesBot2';
-import { evaluateBot2Core } from './strategyBot2Core';
+import { SolanaBotV1Config, SolanaBotV1Position, Candle } from './typesSolanaBotV1';
+import { evaluateSolanaBotV1Core } from './strategySolanaBotV1Core';
 
 export interface ATRResult {
   atr: number;
@@ -99,10 +99,10 @@ export function calculateVWAPSession(candles: Candle[]): number | null {
   return totalV > 0 ? totalPV / totalV : null;
 }
 
-export type Bot2Action = 'buy' | 'sell' | 'hold';
+export type SolanaBotV1Action = 'buy' | 'sell' | 'hold';
 
-export interface Bot2SignalResult {
-  action: Bot2Action;
+export interface SolanaBotV1SignalResult {
+  action: SolanaBotV1Action;
   reason: string;
   price: number;
   rsi: number | null;
@@ -113,16 +113,16 @@ export interface Bot2SignalResult {
   rsiDirection: 'rising' | 'falling' | 'flat';
 }
 
-export function evaluateBot2Strategy(
+export function evaluateSolanaBotV1Strategy(
   price: number,
   candles: Candle[],
-  position: Bot2Position,
-  cfg: Bot2Config,
+  position: SolanaBotV1Position,
+  cfg: SolanaBotV1Config,
   nowMs: number,
-): Bot2SignalResult {
-  const s = cfg.bot2.strategy;
+): SolanaBotV1SignalResult {
+  const s = cfg.solanaBotV1.strategy;
 
-  const tf = cfg.bot2.timeframe?.trim().toLowerCase() ?? '15m';
+  const tf = cfg.solanaBotV1.timeframe?.trim().toLowerCase() ?? '15m';
   const tfMatch = tf.match(/^([0-9]+)\s*([mhd])$/);
   const tfMinutes = tfMatch
     ? (() => {
@@ -176,7 +176,7 @@ export function evaluateBot2Strategy(
       });
     }
 
-    const p = cfg.bot2.strategy.regimeFilter?.emaPeriodDays ?? 50;
+    const p = cfg.solanaBotV1.strategy.regimeFilter?.emaPeriodDays ?? 50;
     htfEma = calculateEMA(dayCandles, p);
     if (dayCandles.length >= 2) {
       prevHtfEma = calculateEMA(dayCandles.slice(0, -1), p);
@@ -195,7 +195,7 @@ export function evaluateBot2Strategy(
     rsiDirection,
   };
 
-  const core = evaluateBot2Core(
+  const core = evaluateSolanaBotV1Core(
     {
       price,
       nowMs,
@@ -215,7 +215,7 @@ export function evaluateBot2Strategy(
   return { action: core.action, reason: core.reason, ...base };
 }
 
-export function buildInitialBot2Position(): Bot2Position {
+export function buildInitialSolanaBotV1Position(): SolanaBotV1Position {
   return {
     inPosition: false,
     entryPrice: null,
@@ -233,14 +233,14 @@ export function buildInitialBot2Position(): Bot2Position {
   };
 }
 
-export function updateBot2Position(
-  position: Bot2Position,
-  action: Bot2Action,
+export function updateSolanaBotV1Position(
+  position: SolanaBotV1Position,
+  action: SolanaBotV1Action,
   price: number,
   size: number,
-  cfg: Bot2Config,
+  cfg: SolanaBotV1Config,
   nowMs: number,
-): Bot2Position {
+): SolanaBotV1Position {
   const today = new Date(nowMs).toDateString();
 
   if (action === 'buy') {
@@ -258,11 +258,11 @@ export function updateBot2Position(
   }
 
   if (action === 'sell' && position.inPosition) {
-    const newPosition = buildInitialBot2Position();
+    const newPosition = buildInitialSolanaBotV1Position();
     newPosition.tradesToday = position.tradesToday + 1;
     newPosition.lastTradeDate = today;
 
-    const cooldownMs = cfg.bot2.risk.cooldownMinutes * 60 * 1000;
+    const cooldownMs = cfg.solanaBotV1.risk.cooldownMinutes * 60 * 1000;
     newPosition.cooldownUntil = nowMs + cooldownMs;
 
     return newPosition;
@@ -273,7 +273,7 @@ export function updateBot2Position(
     let trailingActive = position.trailingActive;
     let trailingPrice = position.trailingPrice;
 
-    const s = cfg.bot2.strategy;
+    const s = cfg.solanaBotV1.strategy;
 
     const mode = s.mode ?? 'mean_reversion';
     const activationPct = mode === 'trend'

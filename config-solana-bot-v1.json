@@ -1,0 +1,77 @@
+{
+  "solanaBotV1": {
+    "enabled": true,
+    "name": "sol-mean-reversion",
+    "timeframe": "1h",
+    "strategy": {
+      "mode": "trend_pullback",
+      "regimeFilter": {
+        "enabled": false,
+        "emaPeriodDays": 200,
+        "requireAboveEma": true,
+        "requireEmaSlopeUp": false,
+        "entryBufferPct": 0,
+        "exitBufferPct": 0
+      },
+      "rsi": {
+        "period": 8,
+        "oversold": 35,
+        "overbought": 55,
+        "exitOversold": 40,
+        "exitOverbought": 65
+      },
+      "vwap": {
+        "anchor": "session",
+        "deviationThresholdPct": 2
+      },
+      "atr": {
+        "period": 14,
+        "volatilityScale": true,
+        "maxPositionPct": 15
+      },
+      "trendFilter": {
+        "enabled": true,
+        "emaPeriod": 50,
+        "disableBelowPct": -4,
+        "disableAbovePct": 8
+      },
+      "entry": {
+        "minDeviationPct": 1.25,
+        "confirmationCandles": 1,
+        "maxRetries": 2
+      },
+      "exit": {
+        "profitTargetPct": 2,
+        "stopLossPct": 4,
+        "trailingStopPct": 1,
+        "trailingActivationPct": 1.5,
+        "maxHoldMinutes": 720
+      },
+      "position": {
+        "maxPositionPct": 80,
+        "minTradeUSDC": 5,
+        "pyramidingEnabled": false
+      },
+      "filters": {
+        "minVolumeUSD": 10000,
+        "minLiquidityPct": 1
+      }
+    },
+    "risk": {
+      "maxDailyTrades": 10,
+      "maxDailyLossPct": 5,
+      "cooldownMinutes": 5,
+      "emergencyStopPct": 10,
+      "maxQuotePriceImpactPct": 0.35
+    }
+  },
+  "notifications": {
+    "enabled": true,
+    "webhookUrl": "",
+    "type": "discord",
+    "botToken": ""
+  },
+  "scheduler": {
+    "cronExpression": "0 * * * *"
+  }
+}

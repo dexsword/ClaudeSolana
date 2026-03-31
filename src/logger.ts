@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
-import { TradeRecord } from './types';
+import { TradeRecord } from './sharedTypes';
 
 export class TradeLogger {
   private db: Database.Database;

@@ -1,9 +1,9 @@
 import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Bot2Config } from './typesBot2';
+import { SolanaBotV1Config } from './typesSolanaBotV1';
 import { fetchCryptoCompareHourlyCandlesRange } from './cryptoCompare';
-import { BacktestCandle, runBot2Backtest } from './bot2BacktestEngine';
+import { BacktestCandle, runSolanaBotV1Backtest } from './solanaBotV1BacktestEngine';
 
 function mulberry32(seed: number): () => number {
   let t = seed >>> 0;
@@ -19,7 +19,7 @@ function pick<T>(arr: T[], rnd: () => number): T {
   return arr[Math.floor(rnd() * arr.length)]!;
 }
 
-function cloneCfg(cfg: Bot2Config): Bot2Config {
+function cloneCfg(cfg: SolanaBotV1Config): SolanaBotV1Config {
   return JSON.parse(JSON.stringify(cfg));
 }
 
@@ -58,7 +58,7 @@ function buildFolds(candles: BacktestCandle[]): Fold[] {
   return folds;
 }
 
-function scoreCandidate(results: Array<ReturnType<typeof runBot2Backtest>['metrics']>): {
+function scoreCandidate(results: Array<ReturnType<typeof runSolanaBotV1Backtest>['metrics']>): {
   score: number;
   positiveFolds: number;
   avgAnn: number;
@@ -100,8 +100,8 @@ async function main(): Promise<void> {
 
   const hours = Math.max(1, Math.round(tfMinutes / 60));
 
-  const baseCfg: Bot2Config = JSON.parse(fs.readFileSync(path.join(__dirname, '../config-bot2.json'), 'utf-8'));
-  baseCfg.bot2.timeframe = timeframe;
+  const baseCfg: SolanaBotV1Config = JSON.parse(fs.readFileSync(path.join(__dirname, '../config-solana-bot-v1.json'), 'utf-8'));
+  baseCfg.solanaBotV1.timeframe = timeframe;
 
   const END_MS = Date.now();
   const START_MS = END_MS - days * 24 * 60 * 60 * 1000;
@@ -130,7 +130,7 @@ async function main(): Promise<void> {
   const capital = 100;
 
   const rnd = mulberry32(seed);
-  let best: { cfg: Bot2Config; score: number; details: string } | null = null;
+  let best: { cfg: SolanaBotV1Config; score: number; details: string } | null = null;
 
   const ranges = {
     mode: ['trend_pullback', 'mean_reversion'] as const,
@@ -150,19 +150,19 @@ async function main(): Promise<void> {
 
   for (let i = 0; i < candidates; i++) {
     const cfg = cloneCfg(baseCfg);
-    cfg.bot2.strategy.mode = pick([...ranges.mode], rnd);
-    cfg.bot2.strategy.rsi.period = pick(ranges.rsiPeriod, rnd);
-    cfg.bot2.strategy.rsi.oversold = pick(ranges.rsiOversold, rnd);
-    cfg.bot2.strategy.rsi.exitOversold = pick(ranges.rsiExitOversold, rnd);
-    cfg.bot2.strategy.entry.minDeviationPct = pick(ranges.minDev, rnd);
-    cfg.bot2.strategy.exit.profitTargetPct = pick(ranges.pt, rnd);
-    cfg.bot2.strategy.exit.stopLossPct = pick(ranges.sl, rnd);
-    cfg.bot2.strategy.rsi.exitOverbought = pick(ranges.exitOB, rnd);
-    cfg.bot2.strategy.trendFilter.emaPeriod = pick(ranges.emaPeriod, rnd);
-    cfg.bot2.strategy.trendFilter.disableBelowPct = pick(ranges.bandBelow, rnd);
-    cfg.bot2.strategy.trendFilter.disableAbovePct = pick(ranges.bandAbove, rnd);
-    cfg.bot2.strategy.exit.maxHoldMinutes = pick(ranges.hold, rnd);
-    cfg.bot2.risk.cooldownMinutes = pick(ranges.cooldown, rnd);
+    cfg.solanaBotV1.strategy.mode = pick([...ranges.mode], rnd);
+    cfg.solanaBotV1.strategy.rsi.period = pick(ranges.rsiPeriod, rnd);
+    cfg.solanaBotV1.strategy.rsi.oversold = pick(ranges.rsiOversold, rnd);
+    cfg.solanaBotV1.strategy.rsi.exitOversold = pick(ranges.rsiExitOversold, rnd);
+    cfg.solanaBotV1.strategy.entry.minDeviationPct = pick(ranges.minDev, rnd);
+    cfg.solanaBotV1.strategy.exit.profitTargetPct = pick(ranges.pt, rnd);
+    cfg.solanaBotV1.strategy.exit.stopLossPct = pick(ranges.sl, rnd);
+    cfg.solanaBotV1.strategy.rsi.exitOverbought = pick(ranges.exitOB, rnd);
+    cfg.solanaBotV1.strategy.trendFilter.emaPeriod = pick(ranges.emaPeriod, rnd);
+    cfg.solanaBotV1.strategy.trendFilter.disableBelowPct = pick(ranges.bandBelow, rnd);
+    cfg.solanaBotV1.strategy.trendFilter.disableAbovePct = pick(ranges.bandAbove, rnd);
+    cfg.solanaBotV1.strategy.exit.maxHoldMinutes = pick(ranges.hold, rnd);
+    cfg.solanaBotV1.risk.cooldownMinutes = pick(ranges.cooldown, rnd);
 
     // Evaluate worst-case across slippage assumptions
     let worstScore = Infinity;
@@ -170,8 +170,8 @@ async function main(): Promise<void> {
     let worstDetails = '';
 
     for (const slip of slippages) {
-      const vals = folds.map((f) => runBot2Backtest(f.val, cfg, { startingCapitalUSDC: capital, slippagePct: slip, feePct: fee }).metrics);
-      const sc = scoreCandidate(vals);
+        const vals = folds.map((f) => runSolanaBotV1Backtest(f.val, cfg, { startingCapitalUSDC: capital, slippagePct: slip, feePct: fee }).metrics);
+        const sc = scoreCandidate(vals);
       if (sc.score < worstScore) {
         worstScore = sc.score;
         worstPos = sc.positiveFolds;
@@ -194,7 +194,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const outPath = path.join(__dirname, '../config-bot2-selected.json');
+  const outPath = path.join(__dirname, '../config-solana-bot-v1-selected.json');
   fs.writeFileSync(outPath, JSON.stringify(best.cfg, null, 2));
   console.log(`Saved: ${outPath}`);
   console.log(`Best score: ${best.score.toFixed(2)} | ${best.details}`);

@@ -1,6 +1,10 @@
-import { Bot2Config, Bot2Position, Candle as Bot2Candle } from './typesBot2';
-import { buildInitialBot2Position, updateBot2Position, calculateRSIShort } from './strategyBot2';
-import { evaluateBot2Core } from './strategyBot2Core';
+import { SolanaBotV1Config, SolanaBotV1Position, Candle as SolanaBotV1Candle } from './typesSolanaBotV1';
+import {
+  buildInitialSolanaBotV1Position,
+  updateSolanaBotV1Position,
+  calculateRSIShort,
+} from './strategySolanaBotV1';
+import { evaluateSolanaBotV1Core } from './strategySolanaBotV1Core';
 
 export interface BacktestCandle {
   timestamp: number; // Unix ms (candle start)
@@ -11,7 +15,7 @@ export interface BacktestCandle {
   volume: number;
 }
 
-export interface Bot2BacktestTrade {
+export interface SolanaBotV1BacktestTrade {
   timestamp: number;
   action: 'buy' | 'sell';
   price: number;
@@ -19,13 +23,13 @@ export interface Bot2BacktestTrade {
   pnl: number;
 }
 
-export interface Bot2BacktestOptions {
+export interface SolanaBotV1BacktestOptions {
   startingCapitalUSDC: number;
   slippagePct: number; // e.g. 0.002
   feePct: number;      // e.g. 0.0004
 }
 
-export interface Bot2BacktestMetrics {
+export interface SolanaBotV1BacktestMetrics {
   startingCapitalUSDC: number;
   finalValueUSDC: number;
   totalReturnPct: number;
@@ -43,10 +47,10 @@ export interface Bot2BacktestMetrics {
   netAfterCostsUSDC: number;
 }
 
-export interface Bot2BacktestResult {
-  metrics: Bot2BacktestMetrics;
-  trades: Bot2BacktestTrade[];
-  endPosition: Bot2Position;
+export interface SolanaBotV1BacktestResult {
+  metrics: SolanaBotV1BacktestMetrics;
+  trades: SolanaBotV1BacktestTrade[];
+  endPosition: SolanaBotV1Position;
 }
 
 function computeMaxDrawdownPct(values: number[]): number {
@@ -91,8 +95,8 @@ function computeSharpeFromEquity(equity: number[], periodsPerYear: number): numb
   return (mean / std) * Math.sqrt(periodsPerYear);
 }
 
-function parseTfMinutesFromCfg(cfg: Bot2Config): number {
-  const tf = cfg.bot2.timeframe?.trim().toLowerCase() ?? '15m';
+function parseTfMinutesFromCfg(cfg: SolanaBotV1Config): number {
+  const tf = cfg.solanaBotV1.timeframe?.trim().toLowerCase() ?? '15m';
   const m = tf.match(/^([0-9]+)\s*([mhd])$/);
   if (!m) return 15;
   const n = parseInt(m[1], 10);
@@ -207,32 +211,36 @@ function computeAtrPercentSeries(candles: BacktestCandle[], period: number): (nu
  * - Execution at NEXT candle open
  * - Slippage and fees always adverse
  */
-export function runBot2Backtest(candles: BacktestCandle[], cfg: Bot2Config, opts: Bot2BacktestOptions): Bot2BacktestResult {
+export function runSolanaBotV1Backtest(
+  candles: BacktestCandle[],
+  cfg: SolanaBotV1Config,
+  opts: SolanaBotV1BacktestOptions,
+): SolanaBotV1BacktestResult {
   const warmup = 120;
   const { startingCapitalUSDC, slippagePct, feePct } = opts;
 
   let usdc = startingCapitalUSDC;
-  let position = buildInitialBot2Position();
-  const trades: Bot2BacktestTrade[] = [];
+  let position = buildInitialSolanaBotV1Position();
+  const trades: SolanaBotV1BacktestTrade[] = [];
   const equityCurve: number[] = [];
 
-  const positionPct = Math.max(0, Math.min(1, cfg.bot2.strategy.position.maxPositionPct / 100));
+  const positionPct = Math.max(0, Math.min(1, cfg.solanaBotV1.strategy.position.maxPositionPct / 100));
 
   const tfMinutesCfg = parseTfMinutesFromCfg(cfg);
   const sessionCandles = Math.max(1, Math.round((24 * 60) / tfMinutesCfg));
 
   const baseHours = tfMinutesCfg / 60;
   const perDay = baseHours >= 1 ? Math.round(24 / baseHours) : 0;
-  const rfDays = cfg.bot2.strategy.regimeFilter?.emaPeriodDays ?? 50;
+  const rfDays = cfg.solanaBotV1.strategy.regimeFilter?.emaPeriodDays ?? 50;
   const htfMap = computeDailyEmaMapping(candles, perDay, rfDays);
 
   const closes = candles.map((c) => c.close);
-  const rsiSeries = calculateRSIShort(candles as unknown as Bot2Candle[], cfg.bot2.strategy.rsi.period);
-  const emaSeries = cfg.bot2.strategy.trendFilter.enabled
-    ? computeEmaSeries(closes, cfg.bot2.strategy.trendFilter.emaPeriod)
+  const rsiSeries = calculateRSIShort(candles as unknown as SolanaBotV1Candle[], cfg.solanaBotV1.strategy.rsi.period);
+  const emaSeries = cfg.solanaBotV1.strategy.trendFilter.enabled
+    ? computeEmaSeries(closes, cfg.solanaBotV1.strategy.trendFilter.emaPeriod)
     : new Array(candles.length).fill(null);
   const vwapSeries = computeRollingVwapSeries(candles, sessionCandles);
-  const atrSeries = computeAtrPercentSeries(candles, cfg.bot2.strategy.atr.period);
+  const atrSeries = computeAtrPercentSeries(candles, cfg.solanaBotV1.strategy.atr.period);
 
   for (let i = warmup; i < candles.length - 1; i++) {
     const c = candles[i];
@@ -254,21 +262,21 @@ export function runBot2Backtest(candles: BacktestCandle[], cfg: Bot2Config, opts
 
     if (rsi === null || vwap === null) {
       if (position.inPosition) {
-        position = updateBot2Position(position, 'hold', price, position.size, cfg, c.timestamp);
+        position = updateSolanaBotV1Position(position, 'hold', price, position.size, cfg, c.timestamp);
       }
       continue;
     }
 
     if (position.cooldownUntil && c.timestamp < position.cooldownUntil) {
       if (position.inPosition) {
-        position = updateBot2Position(position, 'hold', price, position.size, cfg, c.timestamp);
+        position = updateSolanaBotV1Position(position, 'hold', price, position.size, cfg, c.timestamp);
       }
       continue;
     }
 
     const deviationPct = ((price - vwap) / vwap) * 100;
 
-    const core = evaluateBot2Core(
+    const core = evaluateSolanaBotV1Core(
       { price, nowMs: c.timestamp, rsi, prevRsi, vwap, atrPercent, ema, prevEma, htfEma, prevHtfEma },
       position,
       cfg,
@@ -278,7 +286,7 @@ export function runBot2Backtest(candles: BacktestCandle[], cfg: Bot2Config, opts
 
     if (action === 'buy' && !position.inPosition) {
       const tradeUsdc = Math.min(usdc * positionPct, usdc);
-      if (tradeUsdc < cfg.bot2.strategy.position.minTradeUSDC) continue;
+      if (tradeUsdc < cfg.solanaBotV1.strategy.position.minTradeUSDC) continue;
 
       // Buy worse: slippage increases effective price; fee reduces output.
       const fillPx = next.open * (1 + slippagePct);
@@ -286,7 +294,7 @@ export function runBot2Backtest(candles: BacktestCandle[], cfg: Bot2Config, opts
       const size = tradeUsdc / effectivePx;
       usdc -= tradeUsdc;
 
-      position = updateBot2Position(position, 'buy', effectivePx, size, cfg, next.timestamp);
+      position = updateSolanaBotV1Position(position, 'buy', effectivePx, size, cfg, next.timestamp);
       trades.push({ timestamp: next.timestamp, action: 'buy', price: effectivePx, size, pnl: 0 });
     } else if (action === 'sell' && position.inPosition && position.entryPrice) {
       const size = position.size;
@@ -300,11 +308,11 @@ export function runBot2Backtest(candles: BacktestCandle[], cfg: Bot2Config, opts
       const pnl = proceeds - costBasis;
 
       usdc += proceeds;
-      position = updateBot2Position(position, 'sell', proceedsPx, size, cfg, next.timestamp);
+      position = updateSolanaBotV1Position(position, 'sell', proceedsPx, size, cfg, next.timestamp);
       trades.push({ timestamp: next.timestamp, action: 'sell', price: proceedsPx, size, pnl });
     } else if (position.inPosition) {
       // Update trailing etc.
-      position = updateBot2Position(position, 'hold', price, position.size, cfg, c.timestamp);
+      position = updateSolanaBotV1Position(position, 'hold', price, position.size, cfg, c.timestamp);
     }
   }
 

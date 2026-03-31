@@ -1,9 +1,9 @@
 import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Bot2Config } from './typesBot2';
+import { SolanaBotV1Config } from './typesSolanaBotV1';
 import { fetchCryptoCompareHourlyCandlesRange } from './cryptoCompare';
-import { BacktestCandle, runBot2Backtest } from './bot2BacktestEngine';
+import { BacktestCandle, runSolanaBotV1Backtest } from './solanaBotV1BacktestEngine';
 
 function aggregateHourly(hourly: BacktestCandle[], hours: number): BacktestCandle[] {
   if (hours <= 1) return hourly;
@@ -50,8 +50,8 @@ async function main(): Promise<void> {
   if (tfMinutes < 60) throw new Error('Holdout script supports >=1h only');
   const hours = Math.max(1, Math.round(tfMinutes / 60));
 
-  const cfg: Bot2Config = JSON.parse(fs.readFileSync(path.join(__dirname, '../config-bot2.json'), 'utf-8'));
-  cfg.bot2.timeframe = timeframe;
+  const cfg: SolanaBotV1Config = JSON.parse(fs.readFileSync(path.join(__dirname, '../config-solana-bot-v1.json'), 'utf-8'));
+  cfg.solanaBotV1.timeframe = timeframe;
 
   const END_MS = Date.now();
   const START_MS = END_MS - days * 24 * 60 * 60 * 1000;
@@ -73,7 +73,7 @@ async function main(): Promise<void> {
 
   console.log(`Candles total: ${candles.length} | Holdout candles: ${holdout.length}`);
 
-  const res = runBot2Backtest(holdout, cfg, { startingCapitalUSDC: 100, slippagePct, feePct });
+  const res = runSolanaBotV1Backtest(holdout, cfg, { startingCapitalUSDC: 100, slippagePct, feePct });
   const m = res.metrics;
   console.log(`Holdout results: Ann ${m.annualizedReturnPct.toFixed(2)}% | Ret ${m.totalReturnPct.toFixed(2)}% | MDD ${m.maxDrawdownPct.toFixed(2)}% | Sharpe ${m.sharpe.toFixed(2)} | Trades ${m.closedTrades} | PF ${m.profitFactor.toFixed(2)}`);
 }

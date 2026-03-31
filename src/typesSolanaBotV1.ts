@@ -7,8 +7,8 @@ export interface Candle {
   volume: number;
 }
 
-export interface Bot2Config {
-  bot2: {
+export interface SolanaBotV1Config {
+  solanaBotV1: {
     enabled: boolean;
     name: string;
     timeframe: string;
@@ -87,7 +87,7 @@ export interface Bot2Config {
   };
 }
 
-export interface Bot2Position {
+export interface SolanaBotV1Position {
   inPosition: boolean;
   entryPrice: number | null;
   entryAssumed?: boolean;
@@ -103,7 +103,7 @@ export interface Bot2Position {
   currentValue: number;
 }
 
-export interface Bot2Signal {
+export interface SolanaBotV1Signal {
   action: 'buy' | 'sell' | 'hold';
   reason: string;
   price: number;

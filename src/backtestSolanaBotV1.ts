@@ -5,8 +5,8 @@ import {
   CryptoCompareCandle,
   fetchCryptoCompareCandlesAggregatedMinutes,
 } from './cryptoCompare';
-import { Bot2Config } from './typesBot2';
-import { runBot2Backtest } from './bot2BacktestEngine';
+import { SolanaBotV1Config } from './typesSolanaBotV1';
+import { runSolanaBotV1Backtest } from './solanaBotV1BacktestEngine';
 
 const args = process.argv.slice(2);
 const fromArg = args.find(a => a.startsWith('--from='))?.split('=')[1];
@@ -25,12 +25,12 @@ const SLIPPAGE = slipArg ? parseFloat(slipArg) / 100 : 0.002;
 const FEE = 0.0004;
 const CAPITAL = 100;
 
-const cfg: Bot2Config = JSON.parse(
-  fs.readFileSync(path.join(__dirname, '../config-bot2.json'), 'utf-8')
+const cfg: SolanaBotV1Config = JSON.parse(
+  fs.readFileSync(path.join(__dirname, '../config-solana-bot-v1.json'), 'utf-8')
 );
 
 async function main() {
-  console.log('Bot #2 - Mean Reversion Backtest');
+  console.log('SolanaBotV1 Backtest');
   console.log('='.repeat(50));
   console.log(`Capital: $${CAPITAL}`);
   console.log(`Slippage: ${(SLIPPAGE * 100).toFixed(2)}%`);
@@ -68,7 +68,7 @@ async function main() {
   console.log(`Fetched ${candles.length} 15m candles`);
 
   console.log(`Running simulation...`);
-  const result = runBot2Backtest(candles, cfg, {
+  const result = runSolanaBotV1Backtest(candles, cfg, {
     startingCapitalUSDC: CAPITAL,
     slippagePct: SLIPPAGE,
     feePct: FEE,
