@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Message } from 'discord.js';
+import { Client, Events, GatewayIntentBits, Message } from 'discord.js';
 import { TradeLogger } from './logger';
 import type { SolanaBotV1TickNotification } from './sharedTypes';
 import type { SolanaBotV1Position } from './typesSolanaBotV1';
@@ -28,7 +28,7 @@ export class DiscordCommands {
     });
 
     this.client.on('messageCreate', (msg: Message) => this.handleMessage(msg));
-    this.client.on('ready', () => {
+    this.client.once(Events.ClientReady, () => {
       console.log(`[Discord] Command bot logged in as ${this.client.user?.tag}`);
     });
     this.client.on('error', (err: Error) => {

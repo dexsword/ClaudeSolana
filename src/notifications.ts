@@ -11,6 +11,7 @@ export interface NotificationConfig {
 
 export class Notifier {
   private cfg: NotificationConfig;
+  private warnedMisconfigured = false;
 
   constructor(cfg: NotificationConfig) {
     this.cfg = cfg;
@@ -105,7 +106,15 @@ export class Notifier {
 
   private async send(text: string): Promise<void> {
     try {
-      if (this.cfg.type === 'discord' && this.cfg.webhookUrl) {
+      if (this.cfg.type === 'discord') {
+        if (!this.cfg.webhookUrl) {
+          if (!this.warnedMisconfigured) {
+            this.warnedMisconfigured = true;
+            console.warn('[Notifier] notifications.enabled=true but DISCORD_WEBHOOK_URL/webhookUrl is empty; skipping Discord sends');
+          }
+          return;
+        }
+
         // Discord hard-limits messages to 2000 chars. Keep a buffer for safety.
         const maxLen = 1_900;
         const chunks = splitByLines(text, maxLen);
@@ -123,7 +132,10 @@ export class Notifier {
         const token = this.cfg.telegramBotToken ?? process.env.TELEGRAM_BOT_TOKEN;
         const chatId = this.cfg.telegramChatId ?? process.env.TELEGRAM_CHAT_ID;
         if (!token || !chatId) {
-          console.warn('[Notifier] Telegram credentials not configured');
+          if (!this.warnedMisconfigured) {
+            this.warnedMisconfigured = true;
+            console.warn('[Notifier] notifications.enabled=true but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID missing; skipping Telegram sends');
+          }
           return;
         }
         await axios.post(

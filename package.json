@@ -11,13 +11,18 @@
     "test": "jest --forceExit",
     "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts",
+    "rebuild": "npm rebuild",
     "backtest": "npx ts-node src/backtestSolanaBotV1.ts",
     "walkforward": "npx ts-node src/walkforwardSolanaBotV1.ts",
     "optimize": "npx ts-node src/optimizeSolanaBotV1.ts",
     "timeframe-eval": "npx ts-node src/timeframeEvalSolanaBotV1.ts",
     "select-config": "npx ts-node src/selectConfigSolanaBotV1.ts",
     "holdout": "npx ts-node src/holdoutSolanaBotV1.ts",
-    "migrate:bot2": "npx ts-node src/migrateBot2ToSolanaBotV1.ts"
+    "migrate:bot2": "npx ts-node src/migrateBot2ToSolanaBotV1.ts",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:restart": "pm2 restart solana-bot-v1",
+    "pm2:stop": "pm2 stop solana-bot-v1",
+    "pm2:logs": "pm2 logs solana-bot-v1"
   },
   "dependencies": {
     "@solana/web3.js": "^1.91.8",

@@ -4,6 +4,8 @@ dist/
 data/
 *.db
 *.log
+*.out
+logs/
 coverage/
 .DS_Store
 

@@ -118,6 +118,10 @@ let botState =
   logger.loadState<{ highWaterMark: number; solBalance: number; usdcBalance: number }>('solanaBotV1_state')
   ?? { highWaterMark: 0, solBalance: 0, usdcBalance: 0 };
 
+let dailyHaltAlert =
+  logger.loadState<{ day: string; reason: string }>('solanaBotV1_daily_halt_alert')
+  ?? { day: '', reason: '' };
+
 async function fetchPrice(): Promise<number> {
   const { data } = await axios.get('https://min-api.cryptocompare.com/data/price', {
     params: { fsym: 'SOL', tsyms: 'USD', api_key: ccKey },
@@ -254,7 +258,13 @@ async function runTick(): Promise<void> {
         ? `Daily trade limit reached (${riskState.tradesToday}/${maxDailyTrades})`
         : `Daily loss limit hit (${dayPnlPct.toFixed(2)}% <= -${maxDailyLossPct}%)`;
       console.warn(`[SolanaBotV1] ${reason} — trading halted for the day`);
-      await notifier.sendAlert(`${reason} — SolanaBotV1 halting new trades until next UTC day`);
+
+      // Avoid spamming alerts every tick while halted.
+      if (dailyHaltAlert.day !== day || dailyHaltAlert.reason !== reason) {
+        dailyHaltAlert = { day, reason };
+        logger.saveState('solanaBotV1_daily_halt_alert', dailyHaltAlert);
+        await notifier.sendAlert(`${reason} — SolanaBotV1 halting new trades until next UTC day`);
+      }
     }
     const pnlFromHigh = totalValue - botState.highWaterMark;
     console.log(`[SolanaBotV1] Wallet: ${balances.solBalance.toFixed(4)} SOL ($${solValue.toFixed(2)}) + $${usdcValue.toFixed(2)} USDC = $${totalValue.toFixed(2)} | SOL%: ${solPct.toFixed(1)}% | High: $${botState.highWaterMark.toFixed(2)} | PnL: ${pnlFromHigh >= 0 ? '+' : ''}$${pnlFromHigh.toFixed(2)}`);
@@ -429,7 +439,7 @@ async function runTick(): Promise<void> {
     const d = signal.diagnostics;
 
     const tickTs = Date.now();
-    const tickAction: SolanaBotV1TickAction = dailyHalt
+    let tickAction: SolanaBotV1TickAction = dailyHalt
       ? 'HALT'
       : d.cooldownRemainingMin !== null && d.cooldownRemainingMin > 0
         ? 'COOLDOWN'
@@ -438,6 +448,8 @@ async function runTick(): Promise<void> {
           : signal.action === 'sell'
             ? 'SELL'
             : 'HOLD';
+
+    let decisionReason = signal.reason;
 
     const gates: ChecklistLine[] = [
       mk('Bot enabled', cfg.solanaBotV1.enabled, `enabled=${cfg.solanaBotV1.enabled}`),
@@ -488,12 +500,178 @@ async function runTick(): Promise<void> {
           mk('Time exit', d.timeExitHit, `hold=${fmt(d.holdMinutes, 0)}m (sell if >${cfg.solanaBotV1.strategy.exit.maxHoldMinutes}m and pnl>0)`),
         ];
 
+    const minTradeUsdc = cfg.solanaBotV1.strategy.position.minTradeUSDC;
+
+    if (!dailyHalt && signal.action === 'buy' && !position.inPosition) {
+      const balances = await walletManager.getBalances(price);
+      const usdcBalance = balances.usdcBalance;
+      const pct = Math.max(0, Math.min(1, cfg.solanaBotV1.strategy.position.maxPositionPct / 100));
+      const tradeUsdc = Math.min(usdcBalance * pct, usdcBalance);
+      
+      if (tradeUsdc < minTradeUsdc) {
+        console.log('[SolanaBotV1] Insufficient USDC balance');
+        tickAction = 'HOLD';
+        decisionReason = `Insufficient USDC balance for minTradeUSDC=${minTradeUsdc}`;
+      } else {
+      
+      console.log(`[SolanaBotV1] BUY ${tradeUsdc.toFixed(2)} USDC worth of SOL at $${price} (dryRun=${dryRun})`);
+      
+      const result = await executor.buySol(tradeUsdc, dryRun, price);
+      console.log(`[SolanaBotV1] Buy result:`, result);
+      if (!result.success && result.error && result.error.includes('Quote price impact too high')) {
+        skipStats.impactSkipsToday += 1;
+        skipStats.impactSkipsTotal += 1;
+        skipStats.lastImpactMsg = result.error;
+        logger.saveState('solanaBotV1_skip_stats', skipStats);
+
+        tickAction = 'SKIP_IMPACT';
+        decisionReason = `Skipped buy: ${result.error}`;
+      }
+      if (!result.success) {
+        if (tickAction !== 'SKIP_IMPACT') {
+          tickAction = 'HOLD';
+          decisionReason = `Buy failed: ${result.error ?? 'unknown error'}`;
+        }
+      } else {
+        const txSig = result.txSignature ?? 'dry-run';
+        const fillPrice = result.price;
+        const fillSol = result.outputAmount;
+
+        await logger.logTrade({
+          timestamp: Date.now(),
+          action: 'buy',
+          side: 'buy',
+          solAmount: fillSol,
+          usdcAmount: tradeUsdc,
+          price: fillPrice,
+          zone: 'SolanaBotV1-mean-rev',
+          txSignature: txSig,
+          dryRun: dryRun,
+          reason: signal.reason,
+          rsi: signal.rsi,
+          vwap: signal.vwap,
+          sma: null,
+          trendBias: 'neutral',
+          pnl: null,
+          avgEntryAtSell: null,
+        });
+        await notifier.sendTradeNotification({
+          timestamp: Date.now(),
+          action: 'buy',
+          side: 'buy',
+          solAmount: fillSol,
+          usdcAmount: tradeUsdc,
+          price: fillPrice,
+          zone: 'SolanaBotV1-mean-rev',
+          txSignature: txSig,
+          dryRun: dryRun,
+          reason: signal.reason,
+          rsi: signal.rsi,
+          vwap: signal.vwap,
+          sma: null,
+          trendBias: 'neutral',
+          pnl: null,
+          avgEntryAtSell: null,
+        }, dryRun);
+
+        position = updateSolanaBotV1Position(position, 'buy', fillPrice, fillSol, cfg, Date.now());
+        logger.saveState('solanaBotV1_position', position);
+        riskState.tradesToday += 1;
+        logger.saveState('solanaBotV1_risk', riskState);
+
+        tickAction = 'BUY';
+        decisionReason = `${signal.reason} | filled $${fillPrice.toFixed(4)} size ${fillSol.toFixed(4)} SOL`;
+      }
+      }
+    } 
+    else if (!dailyHalt && signal.action === 'sell' && position.inPosition && position.entryPrice) {
+      const balances = await walletManager.getBalances(price);
+      const solBalance = balances.solBalance;
+      const size = Math.min(position.size, solBalance);
+      
+      if (size < 0.01) {
+        console.log('[SolanaBotV1] Insufficient SOL balance');
+        tickAction = 'HOLD';
+        decisionReason = 'Insufficient SOL balance';
+      } else {
+        console.log(`[SolanaBotV1] SELL ${size.toFixed(4)} SOL at $${price}`);
+
+        const result = await executor.sellSol(size, dryRun, price);
+        if (!result.success && result.error && result.error.includes('Quote price impact too high')) {
+          skipStats.impactSkipsToday += 1;
+          skipStats.impactSkipsTotal += 1;
+          skipStats.lastImpactMsg = result.error;
+          logger.saveState('solanaBotV1_skip_stats', skipStats);
+
+          tickAction = 'SKIP_IMPACT';
+          decisionReason = `Skipped sell: ${result.error}`;
+        }
+
+        if (!result.success) {
+          if (tickAction !== 'SKIP_IMPACT') {
+            tickAction = 'HOLD';
+            decisionReason = `Sell failed: ${result.error ?? 'unknown error'}`;
+          }
+        } else {
+          const txSig = result.txSignature ?? 'dry-run';
+          const fillPrice = result.price;
+          const proceedsUsdc = result.outputAmount;
+          const pnl = (fillPrice - position.entryPrice) * size;
+
+          await logger.logTrade({
+            timestamp: Date.now(),
+            action: 'sell',
+            side: 'sell',
+            solAmount: size,
+            usdcAmount: proceedsUsdc,
+            price: fillPrice,
+            zone: 'SolanaBotV1-mean-rev',
+            txSignature: txSig,
+            dryRun: dryRun,
+            reason: signal.reason,
+            rsi: signal.rsi,
+            vwap: signal.vwap,
+            sma: null,
+            trendBias: 'neutral',
+            pnl: pnl,
+            avgEntryAtSell: position.entryPrice,
+          });
+          await notifier.sendTradeNotification({
+            timestamp: Date.now(),
+            action: 'sell',
+            side: 'sell',
+            solAmount: size,
+            usdcAmount: proceedsUsdc,
+            price: fillPrice,
+            zone: 'SolanaBotV1-mean-rev',
+            txSignature: txSig,
+            dryRun: dryRun,
+            reason: signal.reason,
+            rsi: signal.rsi,
+            vwap: signal.vwap,
+            sma: null,
+            trendBias: 'neutral',
+            pnl: pnl,
+            avgEntryAtSell: position.entryPrice,
+          }, dryRun);
+
+          position = updateSolanaBotV1Position(position, 'sell', fillPrice, size, cfg, Date.now());
+          logger.saveState('solanaBotV1_position', position);
+          riskState.tradesToday += 1;
+          logger.saveState('solanaBotV1_risk', riskState);
+
+          tickAction = 'SELL';
+          decisionReason = `${signal.reason} | filled $${fillPrice.toFixed(4)} size ${size.toFixed(4)} SOL pnl ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+        }
+      }
+    }
+
     const tick: SolanaBotV1TickNotification = {
       ts: tickTs,
       timeframe: cfg.solanaBotV1.timeframe,
       mode: d.mode,
       action: tickAction,
-      decisionReason: signal.reason,
+      decisionReason,
       price: signal.price,
       rsi: signal.rsi,
       rsiDirection: signal.rsiDirection,
@@ -509,8 +687,8 @@ async function runTick(): Promise<void> {
         inPosition: position.inPosition,
         entryPrice: position.entryPrice,
         entryAssumed: Boolean(position.entryAssumed),
-        unrealizedPct: d.pnlPct,
-        holdMinutes: d.holdMinutes,
+        unrealizedPct: position.inPosition && position.entryPrice ? ((price - position.entryPrice) / position.entryPrice) * 100 : null,
+        holdMinutes: position.inPosition && position.entryTime ? (tickTs - position.entryTime) / 60000 : null,
         solPct: currentSolPct,
         solBalance: balances.solBalance,
         usdcBalance: balances.usdcBalance,
@@ -522,7 +700,7 @@ async function runTick(): Promise<void> {
         maxDailyTrades,
         impactSkipsToday: skipStats.impactSkipsToday,
         dailyHalt,
-        cooldownRemainingMin: d.cooldownRemainingMin,
+        cooldownRemainingMin: position.cooldownUntil ? Math.max(0, Math.round((position.cooldownUntil - tickTs) / 60000)) : null,
       },
       checklist: {
         gates,
@@ -533,139 +711,6 @@ async function runTick(): Promise<void> {
 
     logger.saveState('solanaBotV1_last_tick', tick);
     await notifier.sendTickNotification(tick);
-    
-    if (!dailyHalt && signal.action === 'buy' && !position.inPosition) {
-      const balances = await walletManager.getBalances(price);
-      const usdcBalance = balances.usdcBalance;
-      const pct = Math.max(0, Math.min(1, cfg.solanaBotV1.strategy.position.maxPositionPct / 100));
-      const tradeUsdc = Math.min(usdcBalance * pct, usdcBalance);
-      
-      if (tradeUsdc < 10) {
-        console.log('[SolanaBotV1] Insufficient USDC balance');
-        return;
-      }
-      
-      console.log(`[SolanaBotV1] BUY ${tradeUsdc.toFixed(2)} USDC worth of SOL at $${price} (dryRun=${dryRun})`);
-      
-      const result = await executor.buySol(tradeUsdc, dryRun, price);
-      console.log(`[SolanaBotV1] Buy result:`, result);
-      if (!result.success && result.error && result.error.includes('Quote price impact too high')) {
-        skipStats.impactSkipsToday += 1;
-        skipStats.impactSkipsTotal += 1;
-        skipStats.lastImpactMsg = result.error;
-        logger.saveState('solanaBotV1_skip_stats', skipStats);
-      }
-      if (result.success) {
-        const txSig = result.txSignature ?? 'dry-run';
-          await logger.logTrade({
-          timestamp: Date.now(),
-          action: 'buy',
-          side: 'buy',
-          solAmount: result.outputAmount,
-          usdcAmount: tradeUsdc,
-          price: price,
-            zone: 'SolanaBotV1-mean-rev',
-          txSignature: txSig,
-          dryRun: dryRun,
-            reason: 'SolanaBotV1 mean-reversion entry',
-          rsi: signal.rsi,
-          vwap: signal.vwap,
-          sma: null,
-          trendBias: 'neutral',
-          pnl: null,
-          avgEntryAtSell: null,
-        });
-          await notifier.sendTradeNotification({
-          timestamp: Date.now(),
-          action: 'buy',
-          side: 'buy',
-          solAmount: result.outputAmount,
-          usdcAmount: tradeUsdc,
-          price: price,
-            zone: 'SolanaBotV1-mean-rev',
-          txSignature: txSig,
-          dryRun: dryRun,
-            reason: 'SolanaBotV1 mean-reversion entry',
-          rsi: signal.rsi,
-          vwap: signal.vwap,
-          sma: null,
-          trendBias: 'neutral',
-          pnl: null,
-          avgEntryAtSell: null,
-        }, dryRun);
-      }
-      
-      position = updateSolanaBotV1Position(position, 'buy', price, tradeUsdc / price, cfg, Date.now());
-      logger.saveState('solanaBotV1_position', position);
-      riskState.tradesToday += 1;
-      logger.saveState('solanaBotV1_risk', riskState);
-    } 
-    else if (!dailyHalt && signal.action === 'sell' && position.inPosition && position.entryPrice) {
-      const balances = await walletManager.getBalances(price);
-      const solBalance = balances.solBalance;
-      const size = Math.min(position.size, solBalance);
-      
-      if (size < 0.01) {
-        console.log('[SolanaBotV1] Insufficient SOL balance');
-        return;
-      }
-      
-      console.log(`[SolanaBotV1] SELL ${size.toFixed(4)} SOL at $${price}`);
-      
-      const pnl = (price - position.entryPrice) * size;
-      
-      const result = await executor.sellSol(size, dryRun, price);
-      if (!result.success && result.error && result.error.includes('Quote price impact too high')) {
-        skipStats.impactSkipsToday += 1;
-        skipStats.impactSkipsTotal += 1;
-        skipStats.lastImpactMsg = result.error;
-        logger.saveState('solanaBotV1_skip_stats', skipStats);
-      }
-      if (result.success) {
-        const txSig = result.txSignature ?? 'dry-run';
-        await logger.logTrade({
-          timestamp: Date.now(),
-          action: 'sell',
-          side: 'sell',
-          solAmount: size,
-          usdcAmount: result.outputAmount,
-          price: price,
-          zone: 'SolanaBotV1-mean-rev',
-          txSignature: txSig,
-          dryRun: dryRun,
-          reason: signal.reason,
-          rsi: signal.rsi,
-          vwap: signal.vwap,
-          sma: null,
-          trendBias: 'neutral',
-          pnl: pnl,
-          avgEntryAtSell: position.entryPrice,
-        });
-        await notifier.sendTradeNotification({
-          timestamp: Date.now(),
-          action: 'sell',
-          side: 'sell',
-          solAmount: size,
-          usdcAmount: result.outputAmount,
-          price: price,
-          zone: 'SolanaBotV1-mean-rev',
-          txSignature: txSig,
-          dryRun: dryRun,
-          reason: signal.reason,
-          rsi: signal.rsi,
-          vwap: signal.vwap,
-          sma: null,
-          trendBias: 'neutral',
-          pnl: pnl,
-          avgEntryAtSell: position.entryPrice,
-        }, dryRun);
-      }
-      
-      position = updateSolanaBotV1Position(position, 'sell', price, size, cfg, Date.now());
-      logger.saveState('solanaBotV1_position', position);
-      riskState.tradesToday += 1;
-      logger.saveState('solanaBotV1_risk', riskState);
-    }
     
   } catch (err) {
     console.error('[SolanaBotV1] Error:', err);
