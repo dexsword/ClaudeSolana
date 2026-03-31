@@ -13,11 +13,13 @@ export class TradeExecutor {
   private connection: Connection;
   private keypair: Keypair;
   private maxSlippageBps: number;
+  private maxPriceImpactPct: number;
 
-  constructor(rpcUrl: string, privateKeyBase58: string, maxSlippagePct: number) {
+  constructor(rpcUrl: string, privateKeyBase58: string, maxSlippagePct: number, maxPriceImpactPct: number = Infinity) {
     this.connection = new Connection(rpcUrl, 'confirmed');
     this.keypair = Keypair.fromSecretKey(bs58.decode(privateKeyBase58));
     this.maxSlippageBps = Math.round(maxSlippagePct * 100); // pct → bps
+    this.maxPriceImpactPct = maxPriceImpactPct;
   }
 
   get walletAddress(): string {
@@ -94,7 +96,17 @@ export class TradeExecutor {
       headers: { 'x-api-key': apiKey },
       timeout: 10000,
     });
-    return resp.data;
+
+    const q = resp.data;
+    const impact = q?.priceImpactPct;
+    if (this.maxPriceImpactPct !== Infinity && impact !== undefined && impact !== null) {
+      const pct = typeof impact === 'string' ? parseFloat(impact) * 100 : Number(impact) * 100;
+      if (Number.isFinite(pct) && pct > this.maxPriceImpactPct) {
+        throw new Error(`Quote price impact too high: ${pct.toFixed(2)}% > ${this.maxPriceImpactPct.toFixed(2)}%`);
+      }
+    }
+
+    return q;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

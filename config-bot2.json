@@ -2,14 +2,23 @@
   "bot2": {
     "enabled": true,
     "name": "sol-mean-reversion",
-    "timeframe": "15m",
+    "timeframe": "1h",
     "strategy": {
+      "mode": "trend_pullback",
+      "regimeFilter": {
+        "enabled": false,
+        "emaPeriodDays": 200,
+        "requireAboveEma": true,
+        "requireEmaSlopeUp": false,
+        "entryBufferPct": 0,
+        "exitBufferPct": 0
+      },
       "rsi": {
-        "period": 4,
-        "oversold": 30,
-        "overbought": 70,
-        "exitOversold": 30,
-        "exitOverbought": 55
+        "period": 8,
+        "oversold": 35,
+        "overbought": 55,
+        "exitOversold": 40,
+        "exitOverbought": 65
       },
       "vwap": {
         "anchor": "session",
@@ -22,24 +31,24 @@
       },
       "trendFilter": {
         "enabled": true,
-        "emaPeriod": 20,
-        "disableBelowPct": -3,
-        "disableAbovePct": 3
+        "emaPeriod": 50,
+        "disableBelowPct": -4,
+        "disableAbovePct": 8
       },
       "entry": {
-        "minDeviationPct": 0.5,
+        "minDeviationPct": 1.25,
         "confirmationCandles": 1,
         "maxRetries": 2
       },
       "exit": {
-        "profitTargetPct": 1,
-        "stopLossPct": 2.5,
+        "profitTargetPct": 2,
+        "stopLossPct": 4,
         "trailingStopPct": 1,
         "trailingActivationPct": 1.5,
-        "maxHoldMinutes": 60
+        "maxHoldMinutes": 720
       },
       "position": {
-        "maxPositionPct": 30,
+        "maxPositionPct": 80,
         "minTradeUSDC": 5,
         "pyramidingEnabled": false
       },
@@ -52,7 +61,17 @@
       "maxDailyTrades": 10,
       "maxDailyLossPct": 5,
       "cooldownMinutes": 5,
-      "emergencyStopPct": 10
+      "emergencyStopPct": 10,
+      "maxQuotePriceImpactPct": 0.35
     }
+  },
+  "notifications": {
+    "enabled": true,
+    "webhookUrl": "",
+    "type": "discord",
+    "botToken": ""
+  },
+  "scheduler": {
+    "cronExpression": "0 * * * *"
   }
 }

@@ -9,6 +9,7 @@ import { WalletManager } from './walletManager';
 import { TradeLogger } from './logger';
 import { Notifier } from './notifications';
 import { DiscordCommands } from './discordCommands';
+import { buildNotifierFromConfig, resolveDiscordBotToken } from './notificationsBootstrap';
 
 // ── Load config ──────────────────────────────────────────────────────────────
 const configPath = path.resolve(__dirname, '..', 'config.json');
@@ -44,19 +45,23 @@ const executor = new TradeExecutor(rpcUrl, privateKey, cfg.strategy.risk.maxSlip
 
 const walletManager = new WalletManager(rpcUrl, executor.walletAddress, cfg.network.useDevnet);
 
-const notifier = new Notifier({
+const notifier: Notifier = buildNotifierFromConfig({
   enabled: cfg.notifications.enabled,
-  webhookUrl: process.env.DISCORD_WEBHOOK_URL ?? cfg.notifications.webhookUrl,
+  webhookUrl: cfg.notifications.webhookUrl,
   type: cfg.notifications.type as 'discord' | 'telegram',
-  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
-  telegramChatId: process.env.TELEGRAM_CHAT_ID,
+  botToken: cfg.notifications.botToken,
 });
 
 const bot = new TradingBot(cfg, executor, walletManager, logger, notifier, dryRun);
 
 // ── Discord command bot ───────────────────────────────────────────────────────
 const startTime = new Date();
-const discordBotToken = process.env.DISCORD_BOT_TOKEN ?? cfg.notifications.botToken ?? '';
+const discordBotToken = resolveDiscordBotToken({
+  enabled: cfg.notifications.enabled,
+  webhookUrl: cfg.notifications.webhookUrl,
+  type: cfg.notifications.type as 'discord' | 'telegram',
+  botToken: cfg.notifications.botToken,
+});
 let discordCommands: DiscordCommands | null = null;
 
 if (discordBotToken) {
@@ -143,4 +148,31 @@ process.on('SIGTERM', () => {
   discordCommands?.destroy();
   logger.close();
   process.exit(0);
+});
+
+let fatalHandling = false;
+async function handleFatal(label: string, err: unknown): Promise<void> {
+  if (fatalHandling) return;
+  fatalHandling = true;
+
+  const e = err as Error;
+  const msg = `${label}: ${e?.message ?? String(err)}`;
+  console.error(`[Main] ${msg}`);
+  try {
+    await notifier.sendAlert(msg);
+  } catch {
+    // best-effort
+  }
+
+  try { discordCommands?.destroy(); } catch {}
+  try { logger.close(); } catch {}
+  setTimeout(() => process.exit(1), 500).unref();
+}
+
+process.on('unhandledRejection', (reason: unknown) => {
+  void handleFatal('Unhandled promise rejection', reason);
+});
+
+process.on('uncaughtException', (err: Error) => {
+  void handleFatal('Uncaught exception', err);
 });

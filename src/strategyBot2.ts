@@ -1,4 +1,5 @@
 import { Bot2Config, Bot2Signal, Bot2Position, Candle } from './typesBot2';
+import { evaluateBot2Core } from './strategyBot2Core';
 
 export interface ATRResult {
   atr: number;
@@ -109,6 +110,7 @@ export interface Bot2SignalResult {
   atrPercent: number | null;
   emaTrend: number | null;
   deviationPct: number;
+  rsiDirection: 'rising' | 'falling' | 'flat';
 }
 
 export function evaluateBot2Strategy(
@@ -120,15 +122,66 @@ export function evaluateBot2Strategy(
 ): Bot2SignalResult {
   const s = cfg.bot2.strategy;
 
+  const tf = cfg.bot2.timeframe?.trim().toLowerCase() ?? '15m';
+  const tfMatch = tf.match(/^([0-9]+)\s*([mhd])$/);
+  const tfMinutes = tfMatch
+    ? (() => {
+        const n = parseInt(tfMatch[1], 10);
+        const unit = tfMatch[2];
+        if (!Number.isFinite(n) || n <= 0) return 15;
+        if (unit === 'm') return n;
+        if (unit === 'h') return n * 60;
+        return n * 1440;
+      })()
+    : 15;
+
   const rsiSeries = calculateRSIShort(candles, s.rsi.period);
   const rsi = rsiSeries[rsiSeries.length - 1];
   const prevRsi = rsiSeries.length > 1 ? rsiSeries[rsiSeries.length - 2] : null;
 
+  const rsiDirection: 'rising' | 'falling' | 'flat' = prevRsi === null || rsi === null
+    ? 'flat'
+    : rsi > prevRsi
+      ? 'rising'
+      : rsi < prevRsi
+        ? 'falling'
+        : 'flat';
+
   const atrResult = calculateATR(candles, s.atr.period);
   const atrPercent = atrResult?.atrPercent ?? null;
 
-  const vwap = calculateVWAPSession(candles.slice(-24));
+  // "session" VWAP is treated as a rolling 24h VWAP.
+  const sessionCandles = Math.max(1, Math.round((24 * 60) / tfMinutes));
+  const vwap = calculateVWAPSession(candles.slice(-sessionCandles));
   const ema = calculateEMA(candles, s.trendFilter.emaPeriod);
+
+  // Higher-timeframe (1d) regime EMA computed from the same candle stream.
+  // Assumes candles represent a fixed timeframe that divides 24h.
+
+  const baseHours = tfMinutes / 60;
+  const perDay = baseHours >= 1 ? Math.round(24 / baseHours) : 0;
+  let htfEma: number | null = null;
+  let prevHtfEma: number | null = null;
+  if (perDay >= 1 && Number.isFinite(perDay) && perDay > 0) {
+    const dayCandles: Candle[] = [];
+    for (let i = 0; i + perDay <= candles.length; i += perDay) {
+      const chunk = candles.slice(i, i + perDay);
+      dayCandles.push({
+        timestamp: chunk[0].timestamp,
+        open: chunk[0].open,
+        high: Math.max(...chunk.map((c) => c.high)),
+        low: Math.min(...chunk.map((c) => c.low)),
+        close: chunk[chunk.length - 1].close,
+        volume: chunk.reduce((sum, c) => sum + c.volume, 0),
+      });
+    }
+
+    const p = cfg.bot2.strategy.regimeFilter?.emaPeriodDays ?? 50;
+    htfEma = calculateEMA(dayCandles, p);
+    if (dayCandles.length >= 2) {
+      prevHtfEma = calculateEMA(dayCandles.slice(0, -1), p);
+    }
+  }
 
   const deviationPct = vwap ? ((price - vwap) / vwap) * 100 : 0;
 
@@ -139,74 +192,34 @@ export function evaluateBot2Strategy(
     atrPercent,
     emaTrend: ema ? ((price - ema) / ema) * 100 : null,
     deviationPct,
+    rsiDirection,
   };
 
-  if (rsi === null || vwap === null) {
-    return { action: 'hold', reason: 'Waiting for indicators', ...base };
-  }
+  const core = evaluateBot2Core(
+    {
+      price,
+      nowMs,
+      rsi,
+      prevRsi,
+      vwap,
+      atrPercent,
+      ema,
+      prevEma: candles.length >= 2 ? calculateEMA(candles.slice(0, -1), s.trendFilter.emaPeriod) : null,
+      htfEma,
+      prevHtfEma,
+    },
+    position,
+    cfg,
+  );
 
-  if (position.cooldownUntil && nowMs < position.cooldownUntil) {
-    const remaining = Math.round((position.cooldownUntil - nowMs) / 60000);
-    return { action: 'hold', reason: `Cooldown: ${remaining}min`, ...base };
-  }
-
-  const emaTrendPct = ema ? ((price - ema) / ema) * 100 : 0;
-  if (s.trendFilter.enabled && ema) {
-    if (emaTrendPct > s.trendFilter.disableAbovePct) {
-      return { action: 'hold', reason: `Strong uptrend: ${emaTrendPct.toFixed(1)}% above EMA`, ...base };
-    }
-    if (emaTrendPct < s.trendFilter.disableBelowPct) {
-      return { action: 'hold', reason: `Strong downtrend: ${emaTrendPct.toFixed(1)}% below EMA`, ...base };
-    }
-  }
-
-  if (position.inPosition && position.entryPrice && position.entryTime) {
-    const pnlPct = ((price - position.entryPrice) / position.entryPrice) * 100;
-    const holdMinutes = (nowMs - position.entryTime) / 60000;
-
-    if (pnlPct >= s.exit.profitTargetPct) {
-      return { action: 'sell', reason: `Profit target: ${pnlPct.toFixed(2)}%`, ...base };
-    }
-
-    if (pnlPct <= -s.exit.stopLossPct) {
-      return { action: 'sell', reason: `Stop loss: ${pnlPct.toFixed(2)}%`, ...base };
-    }
-
-    if (position.trailingActive && position.trailingPrice && price <= position.trailingPrice) {
-      return { action: 'sell', reason: `Trailing stop hit`, ...base };
-    }
-
-    if (holdMinutes > s.exit.maxHoldMinutes && pnlPct > 0) {
-      return { action: 'sell', reason: `Time exit: ${holdMinutes.toFixed(0)}min at +${pnlPct.toFixed(1)}%`, ...base };
-    }
-
-    if (pnlPct >= s.exit.trailingActivationPct && !position.trailingActive) {
-      const newTrailing = price * (1 - s.exit.trailingStopPct / 100);
-      return { action: 'hold', reason: `Trailing at ${newTrailing.toFixed(2)}`, ...base };
-    }
-
-    if (rsi > s.rsi.exitOverbought && prevRsi && prevRsi < rsi) {
-      return { action: 'sell', reason: `RSI overbought exit: ${rsi.toFixed(1)}`, ...base };
-    }
-
-    return { action: 'hold', reason: `Holding: ${pnlPct.toFixed(2)}%`, ...base };
-  }
-
-  const oversold = rsi < s.rsi.oversold;
-  const deviationMet = Math.abs(deviationPct) >= s.entry.minDeviationPct;
-  const belowVwap = deviationPct < -s.entry.minDeviationPct;
-
-  if (oversold && deviationMet && belowVwap) {
-    return { action: 'buy', reason: `Oversold: RSI=${rsi.toFixed(1)}, Dev=${deviationPct.toFixed(1)}%`, ...base };
-  }
-
-  return { action: 'hold', reason: 'No entry signal', ...base };
+  return { action: core.action, reason: core.reason, ...base };
 }
 
 export function buildInitialBot2Position(): Bot2Position {
   return {
     inPosition: false,
     entryPrice: null,
+    entryAssumed: false,
     entryTime: null,
     size: 0,
     pnlPct: 0,
@@ -235,6 +248,7 @@ export function updateBot2Position(
       ...position,
       inPosition: true,
       entryPrice: price,
+      entryAssumed: false,
       entryTime: nowMs,
       size,
       pnlPct: 0,
@@ -260,13 +274,22 @@ export function updateBot2Position(
     let trailingPrice = position.trailingPrice;
 
     const s = cfg.bot2.strategy;
-    if (pnlPct >= s.exit.trailingActivationPct && !trailingActive) {
+
+    const mode = s.mode ?? 'mean_reversion';
+    const activationPct = mode === 'trend'
+      ? Math.max(6, s.exit.trailingActivationPct)
+      : s.exit.trailingActivationPct;
+    const trailPct = mode === 'trend'
+      ? Math.max(3, s.exit.trailingStopPct)
+      : s.exit.trailingStopPct;
+
+    if (pnlPct >= activationPct && !trailingActive) {
       trailingActive = true;
-      trailingPrice = price * (1 - s.exit.trailingStopPct / 100);
+      trailingPrice = price * (1 - trailPct / 100);
     }
 
     if (trailingActive && trailingPrice) {
-      const newTrailing = price * (1 - s.exit.trailingStopPct / 100);
+      const newTrailing = price * (1 - trailPct / 100);
       if (newTrailing > trailingPrice) {
         trailingPrice = newTrailing;
       }

@@ -6,3 +6,8 @@ data/
 *.log
 coverage/
 .DS_Store
+
+# Generated evaluation artifacts
+timeframe-evaluation.json
+config-bot2-selected.json
+config-bot2-optimized.json

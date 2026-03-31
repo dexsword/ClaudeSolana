@@ -13,6 +13,15 @@ export interface Bot2Config {
     name: string;
     timeframe: string;
     strategy: {
+      mode?: 'mean_reversion' | 'trend_pullback' | 'trend' | 'regime_switch';
+      regimeFilter?: {
+        enabled: boolean;
+        emaPeriodDays: number;
+        requireAboveEma: boolean;
+        requireEmaSlopeUp: boolean;
+        entryBufferPct?: number;
+        exitBufferPct?: number;
+      };
       rsi: {
         period: number;
         oversold: number;
@@ -62,13 +71,26 @@ export interface Bot2Config {
       maxDailyLossPct: number;
       cooldownMinutes: number;
       emergencyStopPct: number;
+      maxQuotePriceImpactPct?: number;
     };
+  };
+
+  notifications?: {
+    enabled: boolean;
+    webhookUrl: string;
+    type: 'discord' | 'telegram';
+    botToken?: string;
+  };
+
+  scheduler?: {
+    cronExpression: string;
   };
 }
 
 export interface Bot2Position {
   inPosition: boolean;
   entryPrice: number | null;
+  entryAssumed?: boolean;
   entryTime: number | null;
   size: number;
   pnlPct: number;
