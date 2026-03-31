@@ -1,5 +1,5 @@
 import { SolanaBotV1Config, SolanaBotV1Position, Candle } from './typesSolanaBotV1';
-import { evaluateSolanaBotV1Core } from './strategySolanaBotV1Core';
+import { evaluateSolanaBotV1CoreDetailed, type SolanaBotV1CoreDiagnostics } from './strategySolanaBotV1Core';
 
 export interface ATRResult {
   atr: number;
@@ -111,6 +111,7 @@ export interface SolanaBotV1SignalResult {
   emaTrend: number | null;
   deviationPct: number;
   rsiDirection: 'rising' | 'falling' | 'flat';
+  diagnostics: SolanaBotV1CoreDiagnostics;
 }
 
 export function evaluateSolanaBotV1Strategy(
@@ -195,7 +196,7 @@ export function evaluateSolanaBotV1Strategy(
     rsiDirection,
   };
 
-  const core = evaluateSolanaBotV1Core(
+  const core = evaluateSolanaBotV1CoreDetailed(
     {
       price,
       nowMs,
@@ -212,7 +213,7 @@ export function evaluateSolanaBotV1Strategy(
     cfg,
   );
 
-  return { action: core.action, reason: core.reason, ...base };
+  return { action: core.action, reason: core.reason, diagnostics: core.diagnostics, ...base };
 }
 
 export function buildInitialSolanaBotV1Position(): SolanaBotV1Position {

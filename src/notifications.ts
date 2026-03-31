@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { StrategySignal, TradeRecord } from './sharedTypes';
+import { SolanaBotV1TickNotification, TradeRecord } from './sharedTypes';
 
 export interface NotificationConfig {
   enabled: boolean;
@@ -41,36 +41,59 @@ export class Notifier {
     await this.send(message);
   }
 
-  async sendSignalNotification(signal: StrategySignal, avgEntry: number | null = null): Promise<void> {
+  async sendTickNotification(tick: SolanaBotV1TickNotification): Promise<void> {
     if (!this.cfg.enabled) return;
 
-    const actionEmoji: Record<string, string> = {
-      hold: '⏸️',
-      bootstrap: '🚀',
-      rebalance_buy: '🟢',
-      rebalance_sell: '🟡',
-      emergency_sell: '🔴',
+    const emojiByAction: Record<SolanaBotV1TickNotification['action'], string> = {
+      HOLD: '⏸️',
+      BUY: '🟢',
+      SELL: '🔴',
+      BOOTSTRAP_SELL: '🟡',
+      HALT: '⛔',
+      COOLDOWN: '🕒',
+      SKIP_IMPACT: '⚠️',
     };
-    const emoji = actionEmoji[signal.action] ?? '❓';
+    const emoji = emojiByAction[tick.action] ?? '❓';
 
-    const rsi = signal.rsi4h !== null ? `${signal.rsi4h.toFixed(1)} (${signal.rsiDirection})` : 'N/A';
-    const vwapDev = signal.rsi4h !== null && signal.vwap4h !== null
-      ? ` | VWAP dev: ${(((signal.price - signal.vwap4h) / signal.vwap4h) * 100).toFixed(1)}%`
-      : '';
-    const avgEntryLine = avgEntry != null && avgEntry > 0
-      ? (() => {
-          const pct = (signal.price - avgEntry) / avgEntry * 100;
-          return `Avg Entry: $${avgEntry.toFixed(4)} | Unrealized: ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
-        })()
-      : '';
+    const fmtNum = (v: number | null, digits: number = 2): string => (v === null ? 'n/a' : v.toFixed(digits));
+    const fmtPct = (v: number | null, digits: number = 2): string => (v === null ? 'n/a' : `${v.toFixed(digits)}%`);
+    const fmtMin = (v: number | null): string => (v === null ? 'n/a' : `${v.toFixed(0)}m`);
+    const fmtLine = (l: { label: string; pass: boolean; detail: string }): string => `${l.pass ? '✅' : '❌'} ${l.label}: ${l.detail}`;
+
+    const ts = new Date(tick.ts).toISOString().slice(0, 19).replace('T', ' ');
+    const rsiLine = tick.rsi === null ? 'RSI n/a' : `RSI ${tick.rsi.toFixed(1)} (${tick.rsiDirection})`;
+    const vwapLine = tick.vwapDevPct === null
+      ? 'VWAP dev n/a'
+      : `VWAP dev ${tick.vwapDevPct.toFixed(2)}% (need <= -${fmtNum(tick.requiredDevPct, 2)}%)`;
+    const emaLine = `EMA50 ${fmtPct(tick.emaTrendPct, 2)} | slope ${fmtPct(tick.emaSlopePct, 3)}`;
+    const atrLine = `ATR ${fmtPct(tick.atrPct, 2)}`;
+
+    const pos = tick.position;
+    const posLine = pos.inPosition
+      ? `IN (${pos.entryAssumed ? 'assumed' : 'tracked'}) entry $${fmtNum(pos.entryPrice, 4)} | U/PnL ${fmtPct(pos.unrealizedPct, 2)} | hold ${fmtMin(pos.holdMinutes)} | SOL% ${pos.solPct.toFixed(1)}%`
+      : `OUT | SOL% ${pos.solPct.toFixed(1)}%`;
+
+    const risk = tick.risk;
+    const riskLine = `dayPnL ${risk.dayPnlPct.toFixed(2)}% | trades ${risk.tradesToday}/${risk.maxDailyTrades} | impactSkips ${risk.impactSkipsToday} | cooldown ${risk.cooldownRemainingMin ?? 0}m | halt ${risk.dailyHalt ? 'YES' : 'no'}`;
 
     const message = [
-      `${emoji} **${signal.action.toUpperCase()}** — Zone: ${signal.zone} [${signal.trendBias}]`,
-      `Price: $${signal.price.toFixed(4)} | RSI: ${rsi}${vwapDev}`,
-      avgEntryLine,
-      `Target: ${signal.targetSolPct}% SOL`,
-      `Reason: ${signal.reason}`,
-    ].filter(Boolean).join('\n');
+      `${emoji} **${tick.action}** (SolanaBotV1 ${tick.timeframe}, ${tick.mode}) — \`${ts}\``,
+      `Price: $${tick.price.toFixed(4)} | ${rsiLine} | ${vwapLine}`,
+      `${emaLine} | ${atrLine}`,
+      `Position: ${posLine}`,
+      `Risk: ${riskLine}`,
+      '',
+      '**Gates**',
+      ...tick.checklist.gates.map(fmtLine),
+      '',
+      '**Entry Checklist**',
+      ...tick.checklist.entry.map(fmtLine),
+      '',
+      '**Exit Checklist**',
+      ...tick.checklist.exit.map(fmtLine),
+      '',
+      `Decision: ${tick.decisionReason}`,
+    ].join('\n');
 
     await this.send(message);
   }
@@ -83,7 +106,19 @@ export class Notifier {
   private async send(text: string): Promise<void> {
     try {
       if (this.cfg.type === 'discord' && this.cfg.webhookUrl) {
-        await axios.post(this.cfg.webhookUrl, { content: text }, { timeout: 8000 });
+        // Discord hard-limits messages to 2000 chars. Keep a buffer for safety.
+        const maxLen = 1_900;
+        const chunks = splitByLines(text, maxLen);
+        if (chunks.length === 1) {
+          await axios.post(this.cfg.webhookUrl, { content: chunks[0] }, { timeout: 8000 });
+          return;
+        }
+
+        for (let i = 0; i < chunks.length; i++) {
+          const prefix = `(${i + 1}/${chunks.length}) `;
+          const body = chunks[i];
+          await axios.post(this.cfg.webhookUrl, { content: `${prefix}${body}` }, { timeout: 8000 });
+        }
       } else if (this.cfg.type === 'telegram') {
         const token = this.cfg.telegramBotToken ?? process.env.TELEGRAM_BOT_TOKEN;
         const chatId = this.cfg.telegramChatId ?? process.env.TELEGRAM_CHAT_ID;
@@ -101,4 +136,36 @@ export class Notifier {
       console.warn('[Notifier] Failed to send notification:', (err as Error).message);
     }
   }
+}
+
+function splitByLines(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const lines = text.split('\n');
+  const out: string[] = [];
+  let cur = '';
+
+  for (const line of lines) {
+    const next = cur ? `${cur}\n${line}` : line;
+    if (next.length <= maxLen) {
+      cur = next;
+      continue;
+    }
+
+    if (cur) out.push(cur);
+
+    // If a single line is too long, hard-split it.
+    if (line.length > maxLen) {
+      for (let i = 0; i < line.length; i += maxLen) {
+        out.push(line.slice(i, i + maxLen));
+      }
+      cur = '';
+      continue;
+    }
+
+    cur = line;
+  }
+
+  if (cur) out.push(cur);
+  return out;
 }

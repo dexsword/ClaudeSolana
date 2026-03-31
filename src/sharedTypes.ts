@@ -1,17 +1,66 @@
-export type TrendBias = 'bullish' | 'neutral' | 'bearish';
 export type RsiDirection = 'rising' | 'falling' | 'flat';
 
-export interface StrategySignal {
-  action: 'bootstrap' | 'rebalance_buy' | 'rebalance_sell' | 'emergency_sell' | 'hold';
-  reason: string;
+export type SolanaBotV1TickAction =
+  | 'HOLD'
+  | 'BUY'
+  | 'SELL'
+  | 'BOOTSTRAP_SELL'
+  | 'HALT'
+  | 'COOLDOWN'
+  | 'SKIP_IMPACT';
+
+export interface ChecklistLine {
+  label: string;
+  pass: boolean;
+  detail: string;
+}
+
+export interface SolanaBotV1TickNotification {
+  ts: number;
+  timeframe: string;
+  mode: string;
+  action: SolanaBotV1TickAction;
+  decisionReason: string;
+
   price: number;
-  rsi4h: number | null;
-  vwap4h: number | null;
-  sma3d: number | null;
-  trendBias: TrendBias;
-  zone: string;
-  targetSolPct: number;
+  rsi: number | null;
   rsiDirection: RsiDirection;
+  vwap: number | null;
+  vwapDevPct: number | null;
+  emaTrendPct: number | null;
+  emaSlopePct: number | null;
+  atrPct: number | null;
+
+  requiredDevPct: number | null;
+  profitTargetPct: number | null;
+  stopLossPct: number | null;
+
+  position: {
+    inPosition: boolean;
+    entryPrice: number | null;
+    entryAssumed: boolean;
+    unrealizedPct: number | null;
+    holdMinutes: number | null;
+    solPct: number;
+    solBalance: number;
+    usdcBalance: number;
+    totalValueUSDC: number;
+  };
+
+  risk: {
+    dayPnlPct: number;
+    tradesToday: number;
+    maxDailyTrades: number;
+    impactSkipsToday: number;
+    dailyHalt: boolean;
+    cooldownRemainingMin: number | null;
+  };
+
+  checklist: {
+    gates: ChecklistLine[];
+    entry: ChecklistLine[];
+    exit: ChecklistLine[];
+  };
 }
 
 export interface TradeRecord {

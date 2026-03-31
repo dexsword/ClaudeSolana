@@ -192,7 +192,7 @@ function optimizeOnTraining(
 }
 
 async function main(): Promise<void> {
-  console.log('SolanaBotV1 - Walk-Forward Optimization (15m)');
+  console.log('SolanaBotV1 - Walk-Forward Validation');
   console.log('='.repeat(70));
 
   if (!CC_KEY) {
@@ -213,6 +213,9 @@ async function main(): Promise<void> {
   const feePct = feeArg ? parseFloat(feeArg) : DEFAULT_FEE;
   const days = daysArg ? Math.max(30, parseInt(daysArg, 10)) : 365;
   const samples = samplesArg ? Math.max(50, parseInt(samplesArg, 10)) : 160;
+
+  console.log(`Timeframe: ${timeframe}`);
+  console.log(`Window: ${days}d | Costs: slippage=${(slippagePct * 100).toFixed(2)}% fee=${(feePct * 100).toFixed(3)}% | Optimization: ${noOpt ? 'disabled' : 'enabled'}${noOpt ? '' : ` (${samples} samples/fold)`}`);
 
   const baseCfg: SolanaBotV1Config = JSON.parse(
     fs.readFileSync(path.join(__dirname, '../config-solana-bot-v1.json'), 'utf-8'),

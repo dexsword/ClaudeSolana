@@ -16,7 +16,8 @@
     "optimize": "npx ts-node src/optimizeSolanaBotV1.ts",
     "timeframe-eval": "npx ts-node src/timeframeEvalSolanaBotV1.ts",
     "select-config": "npx ts-node src/selectConfigSolanaBotV1.ts",
-    "holdout": "npx ts-node src/holdoutSolanaBotV1.ts"
+    "holdout": "npx ts-node src/holdoutSolanaBotV1.ts",
+    "migrate:bot2": "npx ts-node src/migrateBot2ToSolanaBotV1.ts"
   },
   "dependencies": {
     "@solana/web3.js": "^1.91.8",

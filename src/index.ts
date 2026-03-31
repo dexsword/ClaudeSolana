@@ -17,7 +17,7 @@ import {
 } from './strategySolanaBotV1';
 import axios from 'axios';
 import { buildNotifierFromConfig, resolveDiscordBotToken } from './notificationsBootstrap';
-import type { StrategySignal } from './sharedTypes';
+import type { ChecklistLine, SolanaBotV1TickAction, SolanaBotV1TickNotification } from './sharedTypes';
 import { fetchRecentCryptoCompareCandlesAggregatedMinutes, fetchCryptoCompareHourlyCandlesRange } from './cryptoCompare';
 
 const configPath = path.resolve(__dirname, '..', 'config-solana-bot-v1.json');
@@ -41,10 +41,8 @@ if (!privateKey) {
 const rpcUrl = process.env.HELIUS_RPC_URL ?? 'https://api.mainnet-beta.solana.com';
 const ccKey = process.env.CRYPTOCOMPARE_API_KEY ?? '';
 
-const legacyDbPath = path.resolve(__dirname, '..', 'data', 'trades-bot2.db');
-const defaultDbPath = path.resolve(__dirname, '..', 'data', 'trades-solana-bot-v1.db');
 const dbPath = process.env.DB_PATH
-  ?? (fs.existsSync(legacyDbPath) ? legacyDbPath : defaultDbPath);
+  ?? path.resolve(__dirname, '..', 'data', 'trades-solana-bot-v1.db');
 const logger = new TradeLogger(dbPath);
 
 const maxImpact = cfg.solanaBotV1.risk.maxQuotePriceImpactPct ?? Infinity;
@@ -89,9 +87,7 @@ function parseTimeframeMinutes(tf: string): number {
 }
 
 let position = buildInitialSolanaBotV1Position();
-const persistedPosition =
-  logger.loadState<typeof position>('solanaBotV1_position')
-  ?? logger.loadState<typeof position>('bot2_position');
+const persistedPosition = logger.loadState<typeof position>('solanaBotV1_position');
 if (persistedPosition) {
   position = persistedPosition;
 }
@@ -104,7 +100,6 @@ type SolanaBotV1RiskState = {
 
 let riskState: SolanaBotV1RiskState =
   logger.loadState<SolanaBotV1RiskState>('solanaBotV1_risk')
-  ?? logger.loadState<SolanaBotV1RiskState>('bot2_risk')
   ?? { day: '', dayStartValueUSDC: 0, tradesToday: 0 };
 
 type SolanaBotV1SkipStats = {
@@ -116,13 +111,11 @@ type SolanaBotV1SkipStats = {
 
 let skipStats: SolanaBotV1SkipStats =
   logger.loadState<SolanaBotV1SkipStats>('solanaBotV1_skip_stats')
-  ?? logger.loadState<SolanaBotV1SkipStats>('bot2_skip_stats')
   ?? { day: '', impactSkipsToday: 0, impactSkipsTotal: 0, lastImpactMsg: null };
 
 let tickInProgress = false;
 let botState =
   logger.loadState<{ highWaterMark: number; solBalance: number; usdcBalance: number }>('solanaBotV1_state')
-  ?? logger.loadState<{ highWaterMark: number; solBalance: number; usdcBalance: number }>('bot2_state')
   ?? { highWaterMark: 0, solBalance: 0, usdcBalance: 0 };
 
 async function fetchPrice(): Promise<number> {
@@ -270,25 +263,64 @@ async function runTick(): Promise<void> {
     if (candles.length < 15) {
       console.log('[SolanaBotV1] Not enough candle data');
 
-      const posStatus = hasPosition ? 'IN' : 'OUT';
-      const posReason = hasPosition
-        ? (position.entryAssumed ? 'entry=assumed' : 'entry=tracked')
-        : 'no_SOL';
-      const status = `pos=${posStatus}(${posReason}) solPct=${currentSolPct.toFixed(1)}% dayPnL=${dayPnlPct.toFixed(2)}% trades=${riskState.tradesToday}/${maxDailyTrades} impactSkips=${skipStats.impactSkipsToday}${dailyHalt ? ' HALT' : ''}`;
+      const mk = (label: string, pass: boolean, detail: string): ChecklistLine => ({ label, pass, detail });
+      const tickTs = Date.now();
+      const mode = cfg.solanaBotV1.strategy.mode ?? 'mean_reversion';
+      const entryAssumed = Boolean(position.entryAssumed);
+      const holdMinutes = position.inPosition && position.entryTime ? (tickTs - position.entryTime) / 60000 : null;
+      const unrealizedPct = position.inPosition && position.entryPrice
+        ? ((price - position.entryPrice) / position.entryPrice) * 100
+        : null;
 
-      const tickHold: StrategySignal = {
-        action: 'hold',
-        reason: `Not enough candle data | ${status}`,
+      const tick: SolanaBotV1TickNotification = {
+        ts: tickTs,
+        timeframe: cfg.solanaBotV1.timeframe,
+        mode,
+        action: dailyHalt ? 'HALT' : 'HOLD',
+        decisionReason: 'Not enough candle data',
         price,
-        rsi4h: null,
-        vwap4h: null,
-        sma3d: null,
-        trendBias: 'neutral',
-        zone: 'solana_v1_mean_rev',
-        targetSolPct: cfg.solanaBotV1.strategy.position.maxPositionPct,
+        rsi: null,
         rsiDirection: 'flat',
+        vwap: null,
+        vwapDevPct: null,
+        emaTrendPct: null,
+        emaSlopePct: null,
+        atrPct: null,
+        requiredDevPct: null,
+        profitTargetPct: null,
+        stopLossPct: null,
+        position: {
+          inPosition: position.inPosition,
+          entryPrice: position.entryPrice,
+          entryAssumed,
+          unrealizedPct,
+          holdMinutes,
+          solPct: currentSolPct,
+          solBalance: balances.solBalance,
+          usdcBalance: balances.usdcBalance,
+          totalValueUSDC: totalValue,
+        },
+        risk: {
+          dayPnlPct,
+          tradesToday: riskState.tradesToday,
+          maxDailyTrades,
+          impactSkipsToday: skipStats.impactSkipsToday,
+          dailyHalt,
+          cooldownRemainingMin: position.cooldownUntil ? Math.max(0, Math.round((position.cooldownUntil - tickTs) / 60000)) : null,
+        },
+        checklist: {
+          gates: [
+            mk('Bot enabled', cfg.solanaBotV1.enabled, `enabled=${cfg.solanaBotV1.enabled}`),
+            mk('Daily risk brake', !dailyHalt, `halt=${dailyHalt} (trades ${riskState.tradesToday}/${maxDailyTrades}, dayPnL ${dayPnlPct.toFixed(2)}%)`),
+            mk('Indicators ready', false, `candles=${candles.length} (need >= 15)`),
+          ],
+          entry: [mk('N/A', true, 'Waiting for indicators')],
+          exit: [mk('N/A', true, 'Waiting for indicators')],
+        },
       };
-      await notifier.sendSignalNotification(tickHold, null);
+
+      logger.saveState('solanaBotV1_last_tick', tick);
+      await notifier.sendTickNotification(tick);
       return;
     }
     
@@ -299,19 +331,55 @@ async function runTick(): Promise<void> {
         if (excessSol > 0.1) {
           console.log(`[SolanaBotV1] Bootstrap: Selling excess SOL (${excessSol.toFixed(4)}) to reach ${targetSolPct}% target`);
 
-          const bootstrapSellSig: StrategySignal = {
-            action: 'rebalance_sell',
-            reason: `Bootstrap: selling excess SOL (${excessSol.toFixed(4)}) to target ${targetSolPct}%`,
+          const mk = (label: string, pass: boolean, detail: string): ChecklistLine => ({ label, pass, detail });
+          const tickTs = Date.now();
+          const mode = cfg.solanaBotV1.strategy.mode ?? 'mean_reversion';
+
+          const tick: SolanaBotV1TickNotification = {
+            ts: tickTs,
+            timeframe: cfg.solanaBotV1.timeframe,
+            mode,
+            action: 'BOOTSTRAP_SELL',
+            decisionReason: `Bootstrap sell: excess SOL ${excessSol.toFixed(4)} to target ${targetSolPct}%`,
             price,
-            rsi4h: null,
-            vwap4h: null,
-            sma3d: null,
-            trendBias: 'neutral',
-            zone: 'solana_v1_mean_rev',
-            targetSolPct: targetSolPct,
+            rsi: null,
             rsiDirection: 'flat',
+            vwap: null,
+            vwapDevPct: null,
+            emaTrendPct: null,
+            emaSlopePct: null,
+            atrPct: null,
+            requiredDevPct: null,
+            profitTargetPct: null,
+            stopLossPct: null,
+            position: {
+              inPosition: position.inPosition,
+              entryPrice: position.entryPrice,
+              entryAssumed: Boolean(position.entryAssumed),
+              unrealizedPct: null,
+              holdMinutes: null,
+              solPct: currentSolPct,
+              solBalance: balances.solBalance,
+              usdcBalance: balances.usdcBalance,
+              totalValueUSDC: totalValue,
+            },
+            risk: {
+              dayPnlPct,
+              tradesToday: riskState.tradesToday,
+              maxDailyTrades,
+              impactSkipsToday: skipStats.impactSkipsToday,
+              dailyHalt,
+              cooldownRemainingMin: null,
+            },
+            checklist: {
+              gates: [mk('Bootstrap condition', true, `solPct=${currentSolPct.toFixed(1)}% > ${targetSolPct + 5}%`)],
+              entry: [mk('N/A', true, 'Bootstrap sell')],
+              exit: [mk('N/A', true, 'Bootstrap sell')],
+            },
           };
-          await notifier.sendSignalNotification(bootstrapSellSig, null);
+
+          logger.saveState('solanaBotV1_last_tick', tick);
+          await notifier.sendTickNotification(tick);
 
           const result = await executor.sellSol(excessSol, dryRun, price);
           if (result.success) {
@@ -356,31 +424,115 @@ async function runTick(): Promise<void> {
     const signal = evaluateSolanaBotV1Strategy(price, candles, position, cfg, Date.now());
     console.log(`[SolanaBotV1] Signal: ${signal.action} - ${signal.reason}`);
 
-    const mappedAction = signal.action === 'buy'
-      ? 'rebalance_buy'
-      : signal.action === 'sell'
-        ? 'rebalance_sell'
-        : 'hold';
+    const mk = (label: string, pass: boolean, detail: string): ChecklistLine => ({ label, pass, detail });
+    const fmt = (v: number | null, digits: number = 2): string => (v === null ? 'n/a' : v.toFixed(digits));
+    const d = signal.diagnostics;
 
-    const posStatus = hasPosition ? 'IN' : 'OUT';
-    const posReason = hasPosition
-      ? (position.entryAssumed ? 'entry=assumed' : 'entry=tracked')
-      : 'no_SOL';
-    const status = `pos=${posStatus}(${posReason}) solPct=${currentSolPct.toFixed(1)}% dayPnL=${dayPnlPct.toFixed(2)}% trades=${riskState.tradesToday}/${maxDailyTrades} impactSkips=${skipStats.impactSkipsToday}${dailyHalt ? ' HALT' : ''}`;
+    const tickTs = Date.now();
+    const tickAction: SolanaBotV1TickAction = dailyHalt
+      ? 'HALT'
+      : d.cooldownRemainingMin !== null && d.cooldownRemainingMin > 0
+        ? 'COOLDOWN'
+        : signal.action === 'buy'
+          ? 'BUY'
+          : signal.action === 'sell'
+            ? 'SELL'
+            : 'HOLD';
 
-    const tickSignal: StrategySignal = {
-      action: mappedAction,
-      reason: `${signal.reason} | ${status}`,
+    const gates: ChecklistLine[] = [
+      mk('Bot enabled', cfg.solanaBotV1.enabled, `enabled=${cfg.solanaBotV1.enabled}`),
+      mk('Daily risk brake', !dailyHalt, `halt=${dailyHalt} (trades ${riskState.tradesToday}/${maxDailyTrades}, dayPnL ${dayPnlPct.toFixed(2)}%)`),
+      mk('Cooldown', d.cooldownRemainingMin === null || d.cooldownRemainingMin === 0, `remaining=${d.cooldownRemainingMin ?? 0}m`),
+      mk('Trend gate (entries)', d.allowEntry || position.inPosition, d.allowEntry ? 'allow' : (d.entryGateReason ?? 'gated')),
+      mk(
+        'Impact guard',
+        true,
+        `maxImpact=${maxImpact === Infinity ? 'none' : `${maxImpact.toFixed(2)}%`} (enforced on quote)`
+      ),
+    ];
+
+    const entryChecklist: ChecklistLine[] = [
+      mk('Price vs EMA50', d.bullishRegime, `emaTrend=${fmt(d.emaTrendPct, 2)}% (need >= 0%)`),
+      mk('EMA slope', d.emaSlopeUp, `emaSlope=${fmt(d.emaSlopePct, 3)}% (need >= 0%)`),
+      mk('VWAP deviation', d.belowVwap, `dev=${fmt(d.deviationPct, 2)}% (need <= -${fmt(d.requiredDevPct, 2)}%)`),
+      mk(
+        'RSI oversold/recovery',
+        d.recoveryOk,
+        `rsi=${fmt(signal.rsi, 1)} prev=${fmt(null, 1)} (need rsi<${cfg.solanaBotV1.strategy.rsi.oversold} OR prev<${cfg.solanaBotV1.strategy.rsi.oversold} and rsi>=${cfg.solanaBotV1.strategy.rsi.exitOversold})`,
+      ),
+      mk('Volatility', d.volOk, `atr=${fmt(signal.atrPercent, 2)}% (need <= 8.00%)`),
+    ];
+
+    // Fill in prevRSI for the checklist if present.
+    if (signal.rsi !== null) {
+      // We don't have prevRSI in the signal payload; use diagnostics gates instead.
+      entryChecklist[3] = mk(
+        'RSI oversold/recovery',
+        d.recoveryOk,
+        `oversoldNow=${d.oversoldNow} wasOversold=${d.wasOversold} rsi=${signal.rsi.toFixed(1)} (oversold<${cfg.solanaBotV1.strategy.rsi.oversold}, exit>=${cfg.solanaBotV1.strategy.rsi.exitOversold})`,
+      );
+    }
+
+    const exitChecklist: ChecklistLine[] = d.pnlPct === null || d.holdMinutes === null
+      ? [mk('Entry tracked', false, 'entryPrice/entryTime missing')]
+      : [
+          mk('Regime exit (deep below EMA)', d.regimeExitHit, `emaTrend=${fmt(d.emaTrendPct, 2)}% (sell if < ${cfg.solanaBotV1.strategy.trendFilter.disableBelowPct}%)`),
+          mk('Stop loss', d.stopLossHit, `pnl=${fmt(d.pnlPct, 2)}% (sell if <= -${fmt(d.stopLossPct, 2)}%)`),
+          mk('Profit target', d.profitTargetHit, `pnl=${fmt(d.pnlPct, 2)}% (sell if >= ${fmt(d.profitTargetPct, 2)}%)`),
+          mk(
+            'RSI exit',
+            d.rsiExitHit,
+            `rsi=${fmt(signal.rsi, 1)} dir=${signal.rsiDirection} (sell if rsi>${cfg.solanaBotV1.strategy.rsi.exitOverbought} and falling)`,
+          ),
+          mk('Reversion exit', d.reversionExitHit, `dev=${fmt(d.deviationPct, 2)}% | pnl=${fmt(d.pnlPct, 2)}%`),
+          mk('Time exit', d.timeExitHit, `hold=${fmt(d.holdMinutes, 0)}m (sell if >${cfg.solanaBotV1.strategy.exit.maxHoldMinutes}m and pnl>0)`),
+        ];
+
+    const tick: SolanaBotV1TickNotification = {
+      ts: tickTs,
+      timeframe: cfg.solanaBotV1.timeframe,
+      mode: d.mode,
+      action: tickAction,
+      decisionReason: signal.reason,
       price: signal.price,
-      rsi4h: signal.rsi,
-      vwap4h: signal.vwap,
-      sma3d: null,
-      trendBias: 'neutral',
-      zone: 'solana_v1_mean_rev',
-      targetSolPct: cfg.solanaBotV1.strategy.position.maxPositionPct,
+      rsi: signal.rsi,
       rsiDirection: signal.rsiDirection,
+      vwap: signal.vwap,
+      vwapDevPct: signal.vwap ? ((signal.price - signal.vwap) / signal.vwap) * 100 : null,
+      emaTrendPct: d.emaTrendPct,
+      emaSlopePct: d.emaSlopePct,
+      atrPct: signal.atrPercent,
+      requiredDevPct: d.requiredDevPct,
+      profitTargetPct: d.profitTargetPct,
+      stopLossPct: d.stopLossPct,
+      position: {
+        inPosition: position.inPosition,
+        entryPrice: position.entryPrice,
+        entryAssumed: Boolean(position.entryAssumed),
+        unrealizedPct: d.pnlPct,
+        holdMinutes: d.holdMinutes,
+        solPct: currentSolPct,
+        solBalance: balances.solBalance,
+        usdcBalance: balances.usdcBalance,
+        totalValueUSDC: totalValue,
+      },
+      risk: {
+        dayPnlPct,
+        tradesToday: riskState.tradesToday,
+        maxDailyTrades,
+        impactSkipsToday: skipStats.impactSkipsToday,
+        dailyHalt,
+        cooldownRemainingMin: d.cooldownRemainingMin,
+      },
+      checklist: {
+        gates,
+        entry: entryChecklist,
+        exit: exitChecklist,
+      },
     };
-    await notifier.sendSignalNotification(tickSignal, null);
+
+    logger.saveState('solanaBotV1_last_tick', tick);
+    await notifier.sendTickNotification(tick);
     
     if (!dailyHalt && signal.action === 'buy' && !position.inPosition) {
       const balances = await walletManager.getBalances(price);
