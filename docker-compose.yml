@@ -6,8 +6,8 @@ services:
     volumes:
       # SQLite database persists across container restarts and updates
       - ./data:/app/data
-      # Edit config.json on the host without rebuilding the image
-      - ./config.json:/app/config.json:ro
+      # Edit config on the host without rebuilding the image
+      - ./config-solana-bot-v1.json:/app/config-solana-bot-v1.json:ro
     logging:
       driver: json-file
       options:

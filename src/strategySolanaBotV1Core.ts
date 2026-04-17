@@ -190,14 +190,14 @@ export function evaluateSolanaBotV1CoreDetailed(
     if (!position.inPosition) {
       if (emaTrendPct < s.trendFilter.disableBelowPct) {
         allowEntry = false;
-        entryGateReason = `Trend filter: ${emaTrendPct.toFixed(1)}% below EMA`;
+        entryGateReason = `Trend filter: ${emaTrendPct.toFixed(1)}% below EMA (need >= ${s.trendFilter.disableBelowPct}%)`;
       } else if (emaTrendPct > s.trendFilter.disableAbovePct) {
         allowEntry = false;
-        entryGateReason = `Trend filter: ${emaTrendPct.toFixed(1)}% above EMA`;
-      } else if (emaSlopePct < -0.05) {
-        allowEntry = false;
-        entryGateReason = `Trend filter: EMA slope ${emaSlopePct.toFixed(2)}%`;
+        entryGateReason = `Trend filter: ${emaTrendPct.toFixed(1)}% above EMA (need <= ${s.trendFilter.disableAbovePct}%)`;
       }
+      // EMA slope gate intentionally removed: slope turns negative during pullbacks,
+      // which is exactly when trend_pullback wants to enter. The price-vs-EMA band
+      // above provides sufficient trend protection without blocking valid entries.
     }
   }
 
@@ -760,10 +760,19 @@ export function evaluateSolanaBotV1CoreDetailed(
   if (mode === 'trend_pullback') {
     // Buy dips in an uptrend.
     const recoveryOk = oversoldNow || (wasOversold && rsi >= s.rsi.exitOversold);
-    if (bullishRegime && emaSlopeUp && belowVwap && recoveryOk && volOk) {
+
+    // Structured debug: log each gate so Discord/logs show exactly what failed.
+    const gateLog = [
+      `bullishRegime=${bullishRegime}(emaTrend=${emaTrendPct?.toFixed(1) ?? 'n/a'}%)`,
+      `belowVwap=${belowVwap}(dev=${deviationPct.toFixed(2)}%,need<=-${requiredDevPct.toFixed(2)}%)`,
+      `recoveryOk=${recoveryOk}(oversoldNow=${oversoldNow},wasOversold=${wasOversold},rsi=${rsi.toFixed(1)})`,
+      `volOk=${volOk}(atr=${atrPercent?.toFixed(2) ?? 'n/a'}%)`,
+    ].join(' | ');
+
+    if (bullishRegime && belowVwap && recoveryOk && volOk) {
       return {
         action: 'buy',
-        reason: `Pullback entry: RSI=${rsi.toFixed(1)} (${dir}), dev=${deviationPct.toFixed(2)}%`,
+        reason: `Pullback entry: RSI=${rsi.toFixed(1)} (${dir}), dev=${deviationPct.toFixed(2)}% | ${gateLog}`,
         diagnostics: {
           mode,
           deviationPct,
@@ -797,7 +806,7 @@ export function evaluateSolanaBotV1CoreDetailed(
     }
     return {
       action: 'hold',
-      reason: 'No entry signal',
+      reason: `No entry: ${gateLog}`,
       diagnostics: {
         mode,
         deviationPct,
@@ -832,10 +841,16 @@ export function evaluateSolanaBotV1CoreDetailed(
 
   // mean_reversion
   const recoveryOk = oversoldNow || (wasOversold && rsi >= s.rsi.exitOversold);
+  const mrGateLog = [
+    `belowVwap=${belowVwap}(dev=${deviationPct.toFixed(2)}%,need<=-${requiredDevPct.toFixed(2)}%)`,
+    `recoveryOk=${recoveryOk}(oversoldNow=${oversoldNow},wasOversold=${wasOversold},rsi=${rsi.toFixed(1)})`,
+    `volOk=${volOk}(atr=${atrPercent?.toFixed(2) ?? 'n/a'}%)`,
+  ].join(' | ');
+
   if (belowVwap && recoveryOk && volOk) {
     return {
       action: 'buy',
-      reason: `MR entry: RSI=${rsi.toFixed(1)} (${dir}), dev=${deviationPct.toFixed(2)}%`,
+      reason: `MR entry: RSI=${rsi.toFixed(1)} (${dir}), dev=${deviationPct.toFixed(2)}% | ${mrGateLog}`,
       diagnostics: {
         mode,
         deviationPct,
@@ -870,7 +885,7 @@ export function evaluateSolanaBotV1CoreDetailed(
 
   return {
     action: 'hold',
-    reason: 'No entry signal',
+    reason: `No entry: ${mrGateLog}`,
     diagnostics: {
       mode,
       deviationPct,

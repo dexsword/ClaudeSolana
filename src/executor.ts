@@ -132,8 +132,11 @@ export class TradeExecutor {
     const txBuf = Buffer.from(swapTransaction, 'base64');
     const tx = VersionedTransaction.deserialize(txBuf);
 
-    // Step 3: Simulate first
-    const sim = await this.connection.simulateTransaction(tx, { commitment: 'confirmed' });
+    // Step 3: Simulate first (replaceRecentBlockhash avoids stale-blockhash failures)
+    const sim = await this.connection.simulateTransaction(tx, {
+      commitment: 'confirmed',
+      replaceRecentBlockhash: true,
+    });
     if (sim.value.err) {
       throw new Error(`Simulation failed: ${JSON.stringify(sim.value.err)}`);
     }
@@ -146,8 +149,16 @@ export class TradeExecutor {
       maxRetries: 3,
     });
 
-    // Step 5: Confirm
-    await this.connection.confirmTransaction(sig, 'confirmed');
+    // Step 5: Confirm (30s timeout to avoid hanging ticks indefinitely)
+    const confirmResult = await Promise.race([
+      this.connection.confirmTransaction(sig, 'confirmed'),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`confirmTransaction timeout for ${sig}`)), 30_000)
+      ),
+    ]);
+    if ((confirmResult as { value?: { err?: unknown } }).value?.err) {
+      throw new Error(`Transaction confirmed with error: ${JSON.stringify((confirmResult as { value: { err: unknown } }).value.err)}`);
+    }
     return sig;
   }
 }

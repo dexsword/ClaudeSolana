@@ -2,7 +2,7 @@
   "solanaBotV1": {
     "enabled": true,
     "name": "sol-mean-reversion",
-    "timeframe": "1h",
+    "timeframe": "15m",
     "strategy": {
       "mode": "trend_pullback",
       "regimeFilter": {
@@ -17,7 +17,7 @@
         "period": 8,
         "oversold": 35,
         "overbought": 55,
-        "exitOversold": 40,
+        "exitOversold": 42,
         "exitOverbought": 65
       },
       "vwap": {
@@ -33,7 +33,7 @@
         "enabled": true,
         "emaPeriod": 50,
         "disableBelowPct": -4,
-        "disableAbovePct": 8
+        "disableAbovePct": 10
       },
       "entry": {
         "minDeviationPct": 1.25,
@@ -42,7 +42,7 @@
       },
       "exit": {
         "profitTargetPct": 2,
-        "stopLossPct": 4,
+        "stopLossPct": 3,
         "trailingStopPct": 1,
         "trailingActivationPct": 1.5,
         "maxHoldMinutes": 720
@@ -72,6 +72,6 @@
     "botToken": ""
   },
   "scheduler": {
-    "cronExpression": "0 * * * *"
+    "cronExpression": "*/15 * * * *"
   }
 }

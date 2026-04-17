@@ -46,7 +46,7 @@ const dbPath = process.env.DB_PATH
 const logger = new TradeLogger(dbPath);
 
 const maxImpact = cfg.solanaBotV1.risk.maxQuotePriceImpactPct ?? Infinity;
-const executor = new TradeExecutor(rpcUrl, privateKey, 0.5, maxImpact);
+const executor = new TradeExecutor(rpcUrl, privateKey, 1.0, maxImpact);
 const walletManager = new WalletManager(rpcUrl, executor.walletAddress, false);
 
 const notifier: Notifier = buildNotifierFromConfig(cfg.notifications);
@@ -503,7 +503,7 @@ async function runTick(): Promise<void> {
     const minTradeUsdc = cfg.solanaBotV1.strategy.position.minTradeUSDC;
 
     if (!dailyHalt && signal.action === 'buy' && !position.inPosition) {
-      const balances = await walletManager.getBalances(price);
+      // Reuse balances already fetched at top of tick — no redundant RPC call.
       const usdcBalance = balances.usdcBalance;
       const pct = Math.max(0, Math.min(1, cfg.solanaBotV1.strategy.position.maxPositionPct / 100));
       const tradeUsdc = Math.min(usdcBalance * pct, usdcBalance);
@@ -585,9 +585,14 @@ async function runTick(): Promise<void> {
       }
     } 
     else if (!dailyHalt && signal.action === 'sell' && position.inPosition && position.entryPrice) {
-      const balances = await walletManager.getBalances(price);
+      // Reuse balances already fetched at top of tick — no redundant RPC call.
       const solBalance = balances.solBalance;
-      const size = Math.min(position.size, solBalance);
+      // Reserve SOL for rent + tx fees. Jupiter wraps native SOL into a WSOL
+      // token account (rent-exempt min = 0.00203928 SOL) plus ~0.001 SOL for
+      // priority fees. Selling the full raw balance causes simulation failure
+      // (InstructionError Custom:1 = InsufficientFunds on the WSOL creation).
+      const SOL_FEE_RESERVE = 0.005;
+      const size = Math.min(position.size, Math.max(0, solBalance - SOL_FEE_RESERVE));
       
       if (size < 0.01) {
         console.log('[SolanaBotV1] Insufficient SOL balance');
@@ -597,6 +602,7 @@ async function runTick(): Promise<void> {
         console.log(`[SolanaBotV1] SELL ${size.toFixed(4)} SOL at $${price}`);
 
         const result = await executor.sellSol(size, dryRun, price);
+        console.log(`[SolanaBotV1] Sell result:`, result);
         if (!result.success && result.error && result.error.includes('Quote price impact too high')) {
           skipStats.impactSkipsToday += 1;
           skipStats.impactSkipsTotal += 1;
